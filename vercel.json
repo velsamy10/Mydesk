@@ -1,23 +1,13 @@
 {
-  "version": 2,
-  "buildCommand": "python _extract_html.py",
-  "outputDirectory": "public",
+  "$schema": "https://openapi.vercel.sh/vercel.json",
   "installCommand": "pip install -r requirements.txt",
   "functions": {
-    "api/state.py": {
-      "maxDuration": 60,
-      "memory": 1024,
-      "includeFiles": "{nifty_monitor.py,external_option_chain_service.py,OptionChainDataSchema.json}"
-    },
-    "api/refresh.py": {
+    "app.py": {
       "maxDuration": 60,
       "memory": 1024,
       "includeFiles": "{nifty_monitor.py,external_option_chain_service.py,OptionChainDataSchema.json}"
     }
   },
-  "rewrites": [
-    { "source": "/", "destination": "/index.html" }
-  ],
   "headers": [
     {
       "source": "/api/(.*)",

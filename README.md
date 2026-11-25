@@ -24,8 +24,9 @@ Requires Python 3.10+ on PATH.
 | File | Purpose |
 |------|---------|
 | `nifty_monitor.py` | Local UI + signal logic |
+| `app.py` + `pyproject.toml` | Vercel WSGI entrypoint (`app:app`) |
 | `external_option_chain_service.py` | NSE option-chain fetch |
-| `api/` + `public/` + `vercel.json` | Vercel deploy layout |
+| `public/` + `vercel.json` | Static UI + function config |
 | `*.pine.txt` | TradingView indicators |
 
 ## Notes

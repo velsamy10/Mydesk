@@ -1,7 +1,4 @@
-"""
-Vercel serverless: GET /api/state — returns last idle/cached shape.
-Does NOT hit NSE (manual Refresh only via POST /api/refresh).
-"""
+"""Legacy /api route kept for local parity; Vercel uses app.py (see pyproject.toml)."""
 from __future__ import annotations
 
 import json

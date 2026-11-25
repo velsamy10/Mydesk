@@ -1347,7 +1347,9 @@ load();
 """
 
 
-class Handler(BaseHTTPRequestHandler):
+class LocalMonitorHandler(BaseHTTPRequestHandler):
+    """Local desktop server only. Named so Vercel does not treat this file as an entrypoint."""
+
     def log_message(self, fmt: str, *args: Any) -> None:
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
 
@@ -1404,7 +1406,7 @@ def main() -> int:
     CFG["expiry"] = args.expiry
 
     host = "127.0.0.1"
-    httpd = ThreadingHTTPServer((host, args.port), Handler)
+    httpd = ThreadingHTTPServer((host, args.port), LocalMonitorHandler)
     url = f"http://{host}:{args.port}/"
 
     # No background NSE poll — user clicks Refresh now
