@@ -14,6 +14,18 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 os.environ.setdefault("VERCEL", "1")
 
+from auth_store import (  # noqa: E402
+    COOKIE_NAME,
+    authenticate,
+    create_session,
+    current_user,
+    destroy_session,
+    parse_cookies,
+    read_json_body,
+    register_user,
+    session_cookie_header,
+)
+
 
 def _cfg_from_query(qs: dict[str, list[str]]) -> dict:
     cfg: dict = {}
@@ -32,58 +44,140 @@ def _cfg_from_query(qs: dict[str, list[str]]) -> dict:
     return cfg
 
 
-def _send(start_response, status: str, body: bytes, content_type: str):
-    start_response(
-        status,
-        [
-            ("Content-Type", content_type),
-            ("Cache-Control", "no-store"),
-            ("Access-Control-Allow-Origin", "*"),
-            ("Content-Length", str(len(body))),
-        ],
-    )
+def _send(
+    start_response,
+    status: str,
+    body: bytes,
+    content_type: str,
+    extra_headers: list[tuple[str, str]] | None = None,
+):
+    headers = [
+        ("Content-Type", content_type),
+        ("Cache-Control", "no-store"),
+        ("Content-Length", str(len(body))),
+    ]
+    if extra_headers:
+        headers.extend(extra_headers)
+    start_response(status, headers)
     return [body]
 
 
-def _json(start_response, code: int, obj) -> list[bytes]:
+def _json(
+    start_response,
+    code: int,
+    obj,
+    extra_headers: list[tuple[str, str]] | None = None,
+) -> list[bytes]:
     body = json.dumps(obj, default=str).encode("utf-8")
-    status = {200: "200 OK", 204: "204 No Content", 404: "404 Not Found", 500: "500 Internal Server Error"}.get(
-        code, f"{code} OK"
-    )
-    return _send(start_response, status, body, "application/json; charset=utf-8")
+    status = {
+        200: "200 OK",
+        201: "201 Created",
+        204: "204 No Content",
+        401: "401 Unauthorized",
+        403: "403 Forbidden",
+        404: "404 Not Found",
+        500: "500 Internal Server Error",
+    }.get(code, f"{code} OK")
+    return _send(start_response, status, body, "application/json; charset=utf-8", extra_headers)
+
+
+def _file(path: Path, content_type: str) -> tuple[bytes, str] | None:
+    if path.exists():
+        return path.read_bytes(), content_type
+    return None
+
+
+def _redirect(start_response, location: str) -> list[bytes]:
+    start_response("302 Found", [("Location", location), ("Cache-Control", "no-store"), ("Content-Length", "0")])
+    return [b""]
 
 
 def app(environ, start_response):
     method = (environ.get("REQUEST_METHOD") or "GET").upper()
     path = environ.get("PATH_INFO") or "/"
     qs = parse_qs(environ.get("QUERY_STRING") or "")
+    user = current_user(environ)
 
     if method == "OPTIONS" and path.startswith("/api/"):
         start_response(
             "204 No Content",
             [
-                ("Access-Control-Allow-Origin", "*"),
                 ("Access-Control-Allow-Methods", "GET, POST, OPTIONS"),
                 ("Access-Control-Allow-Headers", "Content-Type"),
+                ("Access-Control-Allow-Credentials", "true"),
                 ("Content-Length", "0"),
             ],
         )
         return [b""]
 
     if path == "/favicon.svg" and method == "GET":
-        fav = ROOT / "public" / "favicon.svg"
-        if fav.exists():
-            return _send(start_response, "200 OK", fav.read_bytes(), "image/svg+xml; charset=utf-8")
+        hit = _file(ROOT / "public" / "favicon.svg", "image/svg+xml; charset=utf-8")
+        if hit:
+            return _send(start_response, "200 OK", hit[0], hit[1])
         return _send(start_response, "404 Not Found", b"missing", "text/plain; charset=utf-8")
 
+    if path in ("/login.html", "/login") and method == "GET":
+        if user:
+            return _redirect(start_response, "/")
+        hit = _file(ROOT / "public" / "login.html", "text/html; charset=utf-8")
+        if hit:
+            return _send(start_response, "200 OK", hit[0], hit[1])
+        return _send(start_response, "404 Not Found", b"login missing", "text/plain; charset=utf-8")
+
+    if path in ("/register.html", "/register") and method == "GET":
+        if user:
+            return _redirect(start_response, "/")
+        hit = _file(ROOT / "public" / "register.html", "text/html; charset=utf-8")
+        if hit:
+            return _send(start_response, "200 OK", hit[0], hit[1])
+        return _send(start_response, "404 Not Found", b"register missing", "text/plain; charset=utf-8")
+
+    if path == "/api/register" and method == "POST":
+        body = read_json_body(environ)
+        ok, msg = register_user(str(body.get("username") or ""), str(body.get("password") or ""))
+        if not ok:
+            return _json(start_response, 400, {"ok": False, "error": msg})
+        return _json(start_response, 201, {"ok": True, "message": msg})
+
+    if path == "/api/login" and method == "POST":
+        body = read_json_body(environ)
+        ok, name_or_err = authenticate(str(body.get("username") or ""), str(body.get("password") or ""))
+        if not ok:
+            return _json(start_response, 401, {"ok": False, "error": name_or_err})
+        cookie = create_session(name_or_err)
+        return _json(
+            start_response,
+            200,
+            {"ok": True, "username": name_or_err},
+            [("Set-Cookie", session_cookie_header(cookie))],
+        )
+
+    if path == "/api/logout" and method in ("GET", "POST"):
+        cookies = parse_cookies(environ)
+        destroy_session(cookies.get(COOKIE_NAME))
+        return _json(
+            start_response,
+            200,
+            {"ok": True},
+            [("Set-Cookie", session_cookie_header("", clear=True))],
+        )
+
+    if path == "/api/me" and method == "GET":
+        if not user:
+            return _json(start_response, 401, {"ok": False, "authenticated": False})
+        return _json(start_response, 200, {"ok": True, "authenticated": True, "username": user})
+
     if path in ("/", "/index.html") and method == "GET":
-        html_path = ROOT / "public" / "index.html"
-        if html_path.exists():
-            raw = html_path.read_bytes()
-            return _send(start_response, "200 OK", raw, "text/html; charset=utf-8")
+        if not user:
+            return _redirect(start_response, "/login.html")
+        hit = _file(ROOT / "public" / "index.html", "text/html; charset=utf-8")
+        if hit:
+            return _send(start_response, "200 OK", hit[0], hit[1])
         return _send(start_response, "404 Not Found", b"index.html missing", "text/plain; charset=utf-8")
 
     if path == "/api/state" and method == "GET":
+        if not user:
+            return _json(start_response, 401, {"ok": False, "error": "Login required", "signal": {"call": "WAIT"}})
         try:
             from nifty_monitor import APP_VERSION, ist_session_status
 
@@ -107,17 +201,21 @@ def app(environ, start_response):
                     },
                     "app_version": APP_VERSION,
                     "runtime": "vercel",
+                    "username": user,
                 },
             )
         except Exception as exc:  # noqa: BLE001
             return _json(start_response, 500, {"error": str(exc), "signal": {"call": "WAIT"}})
 
     if path == "/api/refresh" and method in ("GET", "POST"):
+        if not user:
+            return _json(start_response, 401, {"ok": False, "error": "Login required", "signal": {"call": "WAIT"}})
         try:
             from nifty_monitor import build_snapshot
 
             snap = build_snapshot(_cfg_from_query(qs))
             snap["ok"] = True
+            snap["username"] = user
             return _json(start_response, 200, snap)
         except Exception as exc:  # noqa: BLE001
             return _json(start_response, 500, {"ok": False, "error": str(exc), "signal": {"call": "WAIT"}})

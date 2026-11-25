@@ -802,7 +802,7 @@ HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>NIFTY Monitor v1</title>
+<title>MyDesk</title>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml"/>
 <link rel="apple-touch-icon" href="/favicon.svg"/>
 <style>
@@ -876,10 +876,14 @@ HTML = r"""<!DOCTYPE html>
 <body>
 <header>
   <div>
-    <h1>NIFTY Monitor <span style="color:var(--muted);font-weight:600">v1</span></h1>
+    <h1>MyDesk <span style="color:var(--muted);font-weight:600">monitor</span></h1>
     <div class="meta" id="meta">Click Refresh now for live data (manual only)…</div>
   </div>
-  <button class="btn" id="refreshBtn" type="button">Refresh now</button>
+  <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+    <span class="meta" id="userLabel"></span>
+    <button class="btn" id="refreshBtn" type="button">Refresh now</button>
+    <button class="btn" id="logoutBtn" type="button">Log out</button>
+  </div>
 </header>
 <main>
   <div id="error" class="err" style="display:none"></div>
@@ -964,6 +968,26 @@ HTML = r"""<!DOCTYPE html>
       <ul class="reasons" id="reasons"><li>Waiting for data…</li></ul>
     </section>
     <section class="card span-12">
+      <h2>Strike band — OI &amp; Change OI</h2>
+      <div style="overflow-x:auto">
+        <table>
+          <thead>
+            <tr>
+              <th>Strike</th>
+              <th>CE OI</th>
+              <th>CE Δday</th>
+              <th>CE Δsnap</th>
+              <th>PE OI</th>
+              <th>PE Δday</th>
+              <th>PE Δsnap</th>
+              <th>PCR</th>
+            </tr>
+          </thead>
+          <tbody id="strikes"></tbody>
+        </table>
+      </div>
+    </section>
+    <section class="card span-12">
       <h2>ATM / ITM liquidity — strike, order block, BAG / FAG</h2>
       <p style="margin:0 0 12px;color:var(--muted);font-size:0.85rem" id="liqNote"></p>
       <div style="overflow-x:auto">
@@ -992,26 +1016,6 @@ HTML = r"""<!DOCTYPE html>
         <span>ATM PE depth (bid/ask qty)</span><span id="peDepth">—</span>
         <span>ATM PE spread</span><span id="peSpread">—</span>
         <span>Liquidity warning</span><span id="liqWarn">—</span>
-      </div>
-    </section>
-    <section class="card span-12">
-      <h2>Strike band — OI &amp; Change OI</h2>
-      <div style="overflow-x:auto">
-        <table>
-          <thead>
-            <tr>
-              <th>Strike</th>
-              <th>CE OI</th>
-              <th>CE Δday</th>
-              <th>CE Δsnap</th>
-              <th>PE OI</th>
-              <th>PE Δday</th>
-              <th>PE Δsnap</th>
-              <th>PCR</th>
-            </tr>
-          </thead>
-          <tbody id="strikes"></tbody>
-        </table>
       </div>
     </section>
     <section class="card span-12">
@@ -1087,12 +1091,27 @@ function fmtSpread(spr, pct, grade) {
   const g = grade || '';
   return `<span class="${liqClass(g)}">${fmtPx(spr)} (${pct != null ? Number(pct).toFixed(2) + '%' : '—'}) ${g}</span>`;
 }
+async function ensureAuth() {
+  const r = await fetch('/api/me', { credentials: 'same-origin' });
+  if (r.status === 401) {
+    location.href = '/login.html';
+    return null;
+  }
+  const d = await r.json();
+  if (!d.ok) {
+    location.href = '/login.html';
+    return null;
+  }
+  $('userLabel').textContent = d.username || '';
+  return d;
+}
 async function load() {
   try {
     let d = window.__applyState || null;
     window.__applyState = null;
     if (!d) {
-      const r = await fetch('/api/state');
+      const r = await fetch('/api/state', { credentials: 'same-origin' });
+      if (r.status === 401) { location.href = '/login.html'; return; }
       d = await r.json();
     }
     if (d.error) {
@@ -1329,7 +1348,8 @@ $('refreshBtn').onclick = async () => {
   $('refreshBtn').disabled = true;
   $('meta').textContent = 'Fetching NSE / CPR / VWAP…';
   try {
-    const r = await fetch('/api/refresh', { method: 'POST' });
+    const r = await fetch('/api/refresh', { method: 'POST', credentials: 'same-origin' });
+    if (r.status === 401) { location.href = '/login.html'; return; }
     const d = await r.json();
     if (d && (d.signal || d.payload !== undefined)) {
       window.__applyState = d;
@@ -1341,8 +1361,15 @@ $('refreshBtn').onclick = async () => {
   }
   $('refreshBtn').disabled = false;
 };
+$('logoutBtn').onclick = async () => {
+  await fetch('/api/logout', { method: 'POST', credentials: 'same-origin' });
+  location.href = '/login.html';
+};
 // Manual refresh only — no timed /api hits
-load();
+(async () => {
+  const me = await ensureAuth();
+  if (me) await load();
+})();
 </script>
 </body>
 </html>
@@ -1355,12 +1382,14 @@ class LocalMonitorHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: Any) -> None:
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
 
-    def _json(self, code: int, obj: Any) -> None:
+    def _json(self, code: int, obj: Any, set_cookie: str | None = None) -> None:
         raw = json.dumps(obj).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(raw)))
         self.send_header("Cache-Control", "no-store")
+        if set_cookie:
+            self.send_header("Set-Cookie", set_cookie)
         self.end_headers()
         self.wfile.write(raw)
 
@@ -1369,42 +1398,161 @@ class LocalMonitorHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(raw)))
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(raw)
 
+    def _redirect(self, location: str) -> None:
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+
+    def _read_json_body(self) -> dict[str, Any]:
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        raw = self.rfile.read(length) if length > 0 else b""
+        if not raw:
+            return {}
+        ctype = (self.headers.get("Content-Type") or "").lower()
+        if "application/json" in ctype:
+            try:
+                obj = json.loads(raw.decode("utf-8"))
+                return obj if isinstance(obj, dict) else {}
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return {}
+        qs = urllib.parse.parse_qs(raw.decode("utf-8", errors="replace"))
+        return {k: (v[0] if v else "") for k, v in qs.items()}
+
+    def _current_user(self) -> str | None:
+        from auth_store import COOKIE_NAME, parse_cookies, user_from_cookie
+
+        cookies = parse_cookies(self.headers.get("Cookie"))
+        return user_from_cookie(cookies.get(COOKIE_NAME))
+
+    def _serve_public(self, name: str, content_type: str) -> bool:
+        path = ROOT / "public" / name
+        if not path.exists():
+            return False
+        raw = path.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(raw)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(raw)
+        return True
+
     def do_GET(self) -> None:  # noqa: N802
         path = urllib.parse.urlparse(self.path).path
+        user = self._current_user()
+
+        if path == "/favicon.svg":
+            if self._serve_public("favicon.svg", "image/svg+xml; charset=utf-8"):
+                return
+            self.send_error(404)
+            return
+
+        if path in ("/login.html", "/login"):
+            if user:
+                self._redirect("/")
+                return
+            if self._serve_public("login.html", "text/html; charset=utf-8"):
+                return
+            self.send_error(404)
+            return
+
+        if path in ("/register.html", "/register"):
+            if user:
+                self._redirect("/")
+                return
+            if self._serve_public("register.html", "text/html; charset=utf-8"):
+                return
+            self.send_error(404)
+            return
+
+        if path == "/api/me":
+            if not user:
+                self._json(401, {"ok": False, "authenticated": False})
+                return
+            self._json(200, {"ok": True, "authenticated": True, "username": user})
+            return
+
+        if path == "/api/logout":
+            from auth_store import COOKIE_NAME, destroy_session, parse_cookies, session_cookie_header
+
+            cookies = parse_cookies(self.headers.get("Cookie"))
+            destroy_session(cookies.get(COOKIE_NAME))
+            self._json(200, {"ok": True}, set_cookie=session_cookie_header("", clear=True))
+            return
+
         if path in ("/", "/index.html"):
+            if not user:
+                self._redirect("/login.html")
+                return
             public = ROOT / "public" / "index.html"
             html = public.read_text(encoding="utf-8") if public.exists() else HTML
             self._html(html)
             return
-        if path == "/favicon.svg":
-            fav = ROOT / "public" / "favicon.svg"
-            if fav.exists():
-                raw = fav.read_bytes()
-                self.send_response(200)
-                self.send_header("Content-Type", "image/svg+xml; charset=utf-8")
-                self.send_header("Content-Length", str(len(raw)))
-                self.send_header("Cache-Control", "public, max-age=86400")
-                self.end_headers()
-                self.wfile.write(raw)
-                return
+
         if path.startswith("/api/state"):
+            if not user:
+                self._json(401, {"ok": False, "error": "Login required", "signal": {"call": "WAIT"}})
+                return
             with STATE_LOCK:
-                # Local: return cached STATE; empty until first refresh/boot
-                self._json(200, dict(STATE))
+                out = dict(STATE)
+                out["username"] = user
+                self._json(200, out)
             return
+
         self.send_error(404)
 
     def do_POST(self) -> None:  # noqa: N802
-        if self.path.startswith("/api/refresh"):
+        path = urllib.parse.urlparse(self.path).path
+
+        if path == "/api/register":
+            from auth_store import register_user
+
+            body = self._read_json_body()
+            ok, msg = register_user(str(body.get("username") or ""), str(body.get("password") or ""))
+            self._json(201 if ok else 400, {"ok": ok, "message": msg} if ok else {"ok": False, "error": msg})
+            return
+
+        if path == "/api/login":
+            from auth_store import authenticate, create_session, session_cookie_header
+
+            body = self._read_json_body()
+            ok, name_or_err = authenticate(str(body.get("username") or ""), str(body.get("password") or ""))
+            if not ok:
+                self._json(401, {"ok": False, "error": name_or_err})
+                return
+            cookie = create_session(name_or_err)
+            self._json(200, {"ok": True, "username": name_or_err}, set_cookie=session_cookie_header(cookie))
+            return
+
+        if path == "/api/logout":
+            from auth_store import COOKIE_NAME, destroy_session, parse_cookies, session_cookie_header
+
+            cookies = parse_cookies(self.headers.get("Cookie"))
+            destroy_session(cookies.get(COOKIE_NAME))
+            self._json(200, {"ok": True}, set_cookie=session_cookie_header("", clear=True))
+            return
+
+        if path.startswith("/api/refresh"):
+            user = self._current_user()
+            if not user:
+                self._json(401, {"ok": False, "error": "Login required", "signal": {"call": "WAIT"}})
+                return
             refresh_once()
             with STATE_LOCK:
                 out = dict(STATE)
                 out["ok"] = True
+                out["username"] = user
                 self._json(200, out)
             return
+
         self.send_error(404)
 
 
@@ -1433,8 +1581,8 @@ def main() -> int:
             "reasons": ["Click Refresh now for live NSE / CPR / VWAP data"],
             "buyers_sellers": "—",
         }
-    print(f"NIFTY Monitor v{APP_VERSION} running at {url}", flush=True)
-    print("Manual Refresh only — no timed NSE hits. Ctrl+C to stop.", flush=True)
+    print(f"MyDesk v{APP_VERSION} running at {url}", flush=True)
+    print("Login required — Register / Log in, then Refresh. Ctrl+C to stop.", flush=True)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

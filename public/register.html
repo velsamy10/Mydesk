@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>MyDesk — Register</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml"/>
+<style>
+  :root {
+    --bg: #0f1419;
+    --panel: #1a222c;
+    --line: #2c3845;
+    --text: #e8eef4;
+    --muted: #8b9aab;
+    --green: #1faa6e;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: grid; place-items: center;
+    font-family: "Segoe UI", system-ui, sans-serif; color: var(--text);
+    background:
+      radial-gradient(900px 480px at 85% 0%, rgba(224,74,74,.16), transparent 55%),
+      radial-gradient(700px 420px at 10% 100%, rgba(31,170,110,.14), transparent 50%),
+      var(--bg);
+  }
+  .shell {
+    width: min(420px, calc(100% - 32px));
+    background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+    padding: 28px 26px 24px;
+  }
+  .brand { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+  .brand img { width: 40px; height: 40px; }
+  h1 {
+    margin: 0; font-size: 1.55rem; font-weight: 750; letter-spacing: 0.04em;
+  }
+  .sub { color: var(--muted); font-size: 0.9rem; margin: 0 0 22px; }
+  label { display: block; font-size: 0.8rem; color: var(--muted); margin: 0 0 6px; }
+  input {
+    width: 100%; padding: 11px 12px; margin-bottom: 14px;
+    border-radius: 8px; border: 1px solid var(--line);
+    background: #121820; color: var(--text); font-size: 1rem;
+  }
+  input:focus { outline: 1px solid #3d5368; border-color: #3d5368; }
+  .hint { color: var(--muted); font-size: 0.78rem; margin: -8px 0 12px; }
+  .btn {
+    width: 100%; margin-top: 6px; padding: 11px 14px; border-radius: 8px;
+    border: 1px solid #2f4a3a; background: #1b3a2c; color: var(--text);
+    font-weight: 700; cursor: pointer; font-size: 0.98rem;
+  }
+  .btn:hover { background: #214836; }
+  .btn:disabled { opacity: 0.6; cursor: wait; }
+  .msg { min-height: 1.2em; margin: 10px 0 0; font-size: 0.88rem; }
+  .msg.err { color: #ffb4b4; }
+  .msg.ok { color: var(--green); }
+  .foot { margin-top: 18px; text-align: center; color: var(--muted); font-size: 0.88rem; }
+  .foot a { color: #9ec9ff; text-decoration: none; }
+  .foot a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+  <div class="shell">
+    <div class="brand">
+      <img src="/favicon.svg" alt=""/>
+      <h1>MyDesk</h1>
+    </div>
+    <p class="sub">Create an account — password is stored encrypted (hashed)</p>
+    <form id="form" autocomplete="on">
+      <label for="username">Username</label>
+      <input id="username" name="username" autocomplete="username" required minlength="3" maxlength="32"/>
+      <p class="hint">3–32 characters: letters, numbers, . _ -</p>
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="new-password" required minlength="6"/>
+      <label for="password2">Confirm password</label>
+      <input id="password2" name="password2" type="password" autocomplete="new-password" required minlength="6"/>
+      <button class="btn" id="btn" type="submit">Register</button>
+      <div class="msg" id="msg"></div>
+    </form>
+    <div class="foot">Already have an account? <a href="/login.html">Log in</a></div>
+  </div>
+<script>
+const $ = (id) => document.getElementById(id);
+$('form').onsubmit = async (e) => {
+  e.preventDefault();
+  const password = $('password').value;
+  if (password !== $('password2').value) {
+    $('msg').className = 'msg err';
+    $('msg').textContent = 'Passwords do not match.';
+    return;
+  }
+  $('btn').disabled = true;
+  $('msg').className = 'msg';
+  $('msg').textContent = 'Creating account…';
+  try {
+    const r = await fetch('/api/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({
+        username: $('username').value.trim(),
+        password,
+      }),
+    });
+    const d = await r.json();
+    if (!r.ok || !d.ok) {
+      $('msg').className = 'msg err';
+      $('msg').textContent = d.error || 'Registration failed';
+      $('btn').disabled = false;
+      return;
+    }
+    $('msg').className = 'msg ok';
+    $('msg').textContent = d.message || 'Registered. Redirecting to login…';
+    setTimeout(() => { location.href = '/login.html'; }, 700);
+  } catch (err) {
+    $('msg').className = 'msg err';
+    $('msg').textContent = String(err);
+    $('btn').disabled = false;
+  }
+};
+</script>
+</body>
+</html>

@@ -1,4 +1,4 @@
-# Mydesk — NIFTY Monitor v1
+# MyDesk — NIFTY Monitor v1
 
 Local (and Vercel-ready) NIFTY options helper: PCR, CPR, liquidity, VWAP, IV, India VIX.  
 **Manual Refresh only** — no timed NSE polling.
@@ -15,7 +15,9 @@ Or:
 python -u nifty_monitor.py --port 8765 --range 3
 ```
 
-Open **http://127.0.0.1:8765/** → click **Refresh now**.
+Open **http://127.0.0.1:8765/** → **Register** → **Log in** → **Refresh now**.
+
+Accounts are stored in `data/users.json` with PBKDF2 password hashes (never plaintext).
 
 Requires Python 3.10+ on PATH.
 

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>NIFTY Monitor v1</title>
+<title>MyDesk</title>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml"/>
 <link rel="apple-touch-icon" href="/favicon.svg"/>
 <style>
@@ -77,10 +77,14 @@
 <body>
 <header>
   <div>
-    <h1>NIFTY Monitor <span style="color:var(--muted);font-weight:600">v1</span></h1>
+    <h1>MyDesk <span style="color:var(--muted);font-weight:600">monitor</span></h1>
     <div class="meta" id="meta">Click Refresh now for live data (manual only)…</div>
   </div>
-  <button class="btn" id="refreshBtn" type="button">Refresh now</button>
+  <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+    <span class="meta" id="userLabel"></span>
+    <button class="btn" id="refreshBtn" type="button">Refresh now</button>
+    <button class="btn" id="logoutBtn" type="button">Log out</button>
+  </div>
 </header>
 <main>
   <div id="error" class="err" style="display:none"></div>
@@ -165,6 +169,26 @@
       <ul class="reasons" id="reasons"><li>Waiting for data…</li></ul>
     </section>
     <section class="card span-12">
+      <h2>Strike band — OI &amp; Change OI</h2>
+      <div style="overflow-x:auto">
+        <table>
+          <thead>
+            <tr>
+              <th>Strike</th>
+              <th>CE OI</th>
+              <th>CE Δday</th>
+              <th>CE Δsnap</th>
+              <th>PE OI</th>
+              <th>PE Δday</th>
+              <th>PE Δsnap</th>
+              <th>PCR</th>
+            </tr>
+          </thead>
+          <tbody id="strikes"></tbody>
+        </table>
+      </div>
+    </section>
+    <section class="card span-12">
       <h2>ATM / ITM liquidity — strike, order block, BAG / FAG</h2>
       <p style="margin:0 0 12px;color:var(--muted);font-size:0.85rem" id="liqNote"></p>
       <div style="overflow-x:auto">
@@ -193,26 +217,6 @@
         <span>ATM PE depth (bid/ask qty)</span><span id="peDepth">—</span>
         <span>ATM PE spread</span><span id="peSpread">—</span>
         <span>Liquidity warning</span><span id="liqWarn">—</span>
-      </div>
-    </section>
-    <section class="card span-12">
-      <h2>Strike band — OI &amp; Change OI</h2>
-      <div style="overflow-x:auto">
-        <table>
-          <thead>
-            <tr>
-              <th>Strike</th>
-              <th>CE OI</th>
-              <th>CE Δday</th>
-              <th>CE Δsnap</th>
-              <th>PE OI</th>
-              <th>PE Δday</th>
-              <th>PE Δsnap</th>
-              <th>PCR</th>
-            </tr>
-          </thead>
-          <tbody id="strikes"></tbody>
-        </table>
       </div>
     </section>
     <section class="card span-12">
@@ -288,12 +292,27 @@ function fmtSpread(spr, pct, grade) {
   const g = grade || '';
   return `<span class="${liqClass(g)}">${fmtPx(spr)} (${pct != null ? Number(pct).toFixed(2) + '%' : '—'}) ${g}</span>`;
 }
+async function ensureAuth() {
+  const r = await fetch('/api/me', { credentials: 'same-origin' });
+  if (r.status === 401) {
+    location.href = '/login.html';
+    return null;
+  }
+  const d = await r.json();
+  if (!d.ok) {
+    location.href = '/login.html';
+    return null;
+  }
+  $('userLabel').textContent = d.username || '';
+  return d;
+}
 async function load() {
   try {
     let d = window.__applyState || null;
     window.__applyState = null;
     if (!d) {
-      const r = await fetch('/api/state');
+      const r = await fetch('/api/state', { credentials: 'same-origin' });
+      if (r.status === 401) { location.href = '/login.html'; return; }
       d = await r.json();
     }
     if (d.error) {
@@ -530,7 +549,8 @@ $('refreshBtn').onclick = async () => {
   $('refreshBtn').disabled = true;
   $('meta').textContent = 'Fetching NSE / CPR / VWAP…';
   try {
-    const r = await fetch('/api/refresh', { method: 'POST' });
+    const r = await fetch('/api/refresh', { method: 'POST', credentials: 'same-origin' });
+    if (r.status === 401) { location.href = '/login.html'; return; }
     const d = await r.json();
     if (d && (d.signal || d.payload !== undefined)) {
       window.__applyState = d;
@@ -542,8 +562,15 @@ $('refreshBtn').onclick = async () => {
   }
   $('refreshBtn').disabled = false;
 };
+$('logoutBtn').onclick = async () => {
+  await fetch('/api/logout', { method: 'POST', credentials: 'same-origin' });
+  location.href = '/login.html';
+};
 // Manual refresh only — no timed /api hits
-load();
+(async () => {
+  const me = await ensureAuth();
+  if (me) await load();
+})();
 </script>
 </body>
 </html>

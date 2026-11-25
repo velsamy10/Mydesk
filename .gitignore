@@ -12,3 +12,7 @@ iv_session_baseline.json
 .env
 .env.*
 *.log
+data/users.json
+data/sessions.json
+data/*.tmp
+

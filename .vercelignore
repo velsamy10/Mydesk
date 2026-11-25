@@ -9,8 +9,11 @@ __pycache__
 agent-transcripts
 *.pine.txt
 _extract_html.py
+_sync_html.py
 README.md
 run_monitor.bat
 ExternalOptionChainService.md
 .git
+data/users.json
+data/sessions.json
 
