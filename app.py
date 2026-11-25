@@ -17,14 +17,21 @@ os.environ.setdefault("VERCEL", "1")
 from auth_store import (  # noqa: E402
     COOKIE_NAME,
     authenticate,
+    client_ip,
     create_session,
     current_user,
     destroy_session,
+    ensure_superadmin,
+    is_admin_username,
+    list_user_logs,
+    list_users_safe,
     parse_cookies,
     read_json_body,
     register_user,
     session_cookie_header,
 )
+
+ensure_superadmin()
 
 
 def _cfg_from_query(qs: dict[str, list[str]]) -> dict:
@@ -73,6 +80,7 @@ def _json(
         200: "200 OK",
         201: "201 Created",
         204: "204 No Content",
+        400: "400 Bad Request",
         401: "401 Unauthorized",
         403: "403 Forbidden",
         404: "404 Not Found",
@@ -97,6 +105,7 @@ def app(environ, start_response):
     path = environ.get("PATH_INFO") or "/"
     qs = parse_qs(environ.get("QUERY_STRING") or "")
     user = current_user(environ)
+    ip = client_ip(environ)
 
     if method == "OPTIONS" and path.startswith("/api/"):
         start_response(
@@ -132,29 +141,39 @@ def app(environ, start_response):
             return _send(start_response, "200 OK", hit[0], hit[1])
         return _send(start_response, "404 Not Found", b"register missing", "text/plain; charset=utf-8")
 
+    if path in ("/admin-logs.html", "/admin-logs") and method == "GET":
+        if not user:
+            return _redirect(start_response, "/login.html")
+        if not is_admin_username(user):
+            return _redirect(start_response, "/")
+        hit = _file(ROOT / "public" / "admin-logs.html", "text/html; charset=utf-8")
+        if hit:
+            return _send(start_response, "200 OK", hit[0], hit[1])
+        return _send(start_response, "404 Not Found", b"admin logs missing", "text/plain; charset=utf-8")
+
     if path == "/api/register" and method == "POST":
         body = read_json_body(environ)
-        ok, msg = register_user(str(body.get("username") or ""), str(body.get("password") or ""))
+        ok, msg = register_user(str(body.get("username") or ""), str(body.get("password") or ""), ip=ip)
         if not ok:
             return _json(start_response, 400, {"ok": False, "error": msg})
         return _json(start_response, 201, {"ok": True, "message": msg})
 
     if path == "/api/login" and method == "POST":
         body = read_json_body(environ)
-        ok, name_or_err = authenticate(str(body.get("username") or ""), str(body.get("password") or ""))
+        ok, name_or_err = authenticate(str(body.get("username") or ""), str(body.get("password") or ""), ip=ip)
         if not ok:
             return _json(start_response, 401, {"ok": False, "error": name_or_err})
         cookie = create_session(name_or_err)
         return _json(
             start_response,
             200,
-            {"ok": True, "username": name_or_err},
+            {"ok": True, "username": name_or_err, "is_admin": is_admin_username(name_or_err)},
             [("Set-Cookie", session_cookie_header(cookie))],
         )
 
     if path == "/api/logout" and method in ("GET", "POST"):
         cookies = parse_cookies(environ)
-        destroy_session(cookies.get(COOKIE_NAME))
+        destroy_session(cookies.get(COOKIE_NAME), ip=ip)
         return _json(
             start_response,
             200,
@@ -165,7 +184,37 @@ def app(environ, start_response):
     if path == "/api/me" and method == "GET":
         if not user:
             return _json(start_response, 401, {"ok": False, "authenticated": False})
-        return _json(start_response, 200, {"ok": True, "authenticated": True, "username": user})
+        return _json(
+            start_response,
+            200,
+            {
+                "ok": True,
+                "authenticated": True,
+                "username": user,
+                "is_admin": is_admin_username(user),
+                "role": "admin" if is_admin_username(user) else "user",
+            },
+        )
+
+    if path == "/api/admin/logs" and method == "GET":
+        if not user:
+            return _json(start_response, 401, {"ok": False, "error": "Login required"})
+        if not is_admin_username(user):
+            return _json(start_response, 403, {"ok": False, "error": "Admin only"})
+        limit = 200
+        if "limit" in qs:
+            try:
+                limit = int(qs["limit"][0])
+            except ValueError:
+                pass
+        return _json(start_response, 200, {"ok": True, "logs": list_user_logs(limit)})
+
+    if path == "/api/admin/users" and method == "GET":
+        if not user:
+            return _json(start_response, 401, {"ok": False, "error": "Login required"})
+        if not is_admin_username(user):
+            return _json(start_response, 403, {"ok": False, "error": "Admin only"})
+        return _json(start_response, 200, {"ok": True, "users": list_users_safe()})
 
     if path in ("/", "/index.html") and method == "GET":
         if not user:
@@ -202,6 +251,7 @@ def app(environ, start_response):
                     "app_version": APP_VERSION,
                     "runtime": "vercel",
                     "username": user,
+                    "is_admin": is_admin_username(user),
                 },
             )
         except Exception as exc:  # noqa: BLE001
@@ -216,6 +266,7 @@ def app(environ, start_response):
             snap = build_snapshot(_cfg_from_query(qs))
             snap["ok"] = True
             snap["username"] = user
+            snap["is_admin"] = is_admin_username(user)
             return _json(start_response, 200, snap)
         except Exception as exc:  # noqa: BLE001
             return _json(start_response, 500, {"ok": False, "error": str(exc), "signal": {"call": "WAIT"}})

@@ -14,5 +14,6 @@ iv_session_baseline.json
 *.log
 data/users.json
 data/sessions.json
+data/user_logs.json
 data/*.tmp
 

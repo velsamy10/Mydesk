@@ -1,5 +1,5 @@
 """
-User auth for mydesk — users.json + PBKDF2 password hashes + signed session cookies.
+User auth for MyDesk — users.json + PBKDF2 password hashes + signed session cookies + user logs.
 """
 from __future__ import annotations
 
@@ -23,12 +23,17 @@ _DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 USERS_PATH = _DATA_DIR / "users.json"
 SESSIONS_PATH = _DATA_DIR / "sessions.json"
+LOGS_PATH = _DATA_DIR / "user_logs.json"
 COOKIE_NAME = "mydesk_session"
 PBKDF2_ITERATIONS = 260_000
 SESSION_DAYS = 14
+MAX_LOGS = 2000
+
+SUPERADMIN_USERNAME = "superadmin"
+SUPERADMIN_PASSWORD = os.environ.get("MYDESK_SUPERADMIN_PASSWORD") or "Admin$123"
 
 _SECRET = os.environ.get("MYDESK_AUTH_SECRET") or "mydesk-dev-secret-change-me"
-_LOCK = threading.Lock()
+_LOCK = threading.RLock()
 
 _USERNAME_RE = re.compile(r"^[a-zA-Z0-9_.-]{3,32}$")
 
@@ -67,8 +72,15 @@ def _load_sessions() -> dict[str, Any]:
     return data
 
 
+def _load_logs() -> dict[str, Any]:
+    data = _read_json(LOGS_PATH, {"logs": []})
+    if not isinstance(data, dict) or not isinstance(data.get("logs"), list):
+        return {"logs": []}
+    return data
+
+
 def hash_password(password: str, salt: bytes | None = None) -> str:
-    """One-way PBKDF2-HMAC-SHA256 (stored as encrypted/hashed form, never plaintext)."""
+    """One-way PBKDF2-HMAC-SHA256 (never store plaintext)."""
     if salt is None:
         salt = secrets.token_bytes(16)
     digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PBKDF2_ITERATIONS)
@@ -89,33 +101,140 @@ def verify_password(password: str, stored: str) -> bool:
     return hmac.compare_digest(got, expected)
 
 
-def register_user(username: str, password: str) -> tuple[bool, str]:
+def append_user_log(
+    action: str,
+    username: str | None = None,
+    ok: bool = True,
+    detail: str = "",
+    ip: str | None = None,
+) -> None:
+    entry = {
+        "ts": _now_iso(),
+        "action": action,
+        "username": username or "",
+        "ok": bool(ok),
+        "detail": detail or "",
+        "ip": ip or "",
+    }
+    with _LOCK:
+        data = _load_logs()
+        logs = data["logs"]
+        logs.append(entry)
+        if len(logs) > MAX_LOGS:
+            data["logs"] = logs[-MAX_LOGS:]
+        _write_json(LOGS_PATH, data)
+
+
+def list_user_logs(limit: int = 200) -> list[dict[str, Any]]:
+    limit = max(1, min(int(limit or 200), MAX_LOGS))
+    with _LOCK:
+        logs = list(_load_logs()["logs"])
+    logs.reverse()
+    return logs[:limit]
+
+
+def list_users_safe() -> list[dict[str, Any]]:
+    with _LOCK:
+        data = _load_users()
+        out = []
+        for u in data["users"]:
+            out.append(
+                {
+                    "username": u.get("username"),
+                    "role": u.get("role") or "user",
+                    "created_at": u.get("created_at"),
+                }
+            )
+        return out
+
+
+def get_user_record(username: str) -> dict[str, Any] | None:
+    username = (username or "").strip()
+    with _LOCK:
+        for u in _load_users()["users"]:
+            if str(u.get("username", "")).lower() == username.lower():
+                return dict(u)
+    return None
+
+
+def is_admin_username(username: str | None) -> bool:
+    if not username:
+        return False
+    rec = get_user_record(username)
+    return bool(rec and str(rec.get("role") or "").lower() == "admin")
+
+
+def ensure_superadmin() -> None:
+    """Create or refresh the built-in admin account (hashed password in users.json)."""
+    with _LOCK:
+        data = _load_users()
+        found = None
+        for u in data["users"]:
+            if str(u.get("username", "")).lower() == SUPERADMIN_USERNAME.lower():
+                found = u
+                break
+        if found is None:
+            data["users"].append(
+                {
+                    "username": SUPERADMIN_USERNAME,
+                    "password_hash": hash_password(SUPERADMIN_PASSWORD),
+                    "role": "admin",
+                    "created_at": _now_iso(),
+                }
+            )
+            _write_json(USERS_PATH, data)
+            return
+        need_write = False
+        if str(found.get("role") or "").lower() != "admin":
+            found["role"] = "admin"
+            need_write = True
+        if found.get("username") != SUPERADMIN_USERNAME:
+            found["username"] = SUPERADMIN_USERNAME
+            need_write = True
+        stored = str(found.get("password_hash") or "")
+        if not stored or not verify_password(SUPERADMIN_PASSWORD, stored):
+            found["password_hash"] = hash_password(SUPERADMIN_PASSWORD)
+            need_write = True
+        if need_write:
+            _write_json(USERS_PATH, data)
+
+
+def register_user(username: str, password: str, ip: str | None = None) -> tuple[bool, str]:
     username = (username or "").strip()
     password = password or ""
     if not _USERNAME_RE.match(username):
+        append_user_log("register", username, False, "invalid username", ip)
         return False, "Username must be 3–32 chars (letters, numbers, . _ -)."
     if len(password) < 6:
+        append_user_log("register", username, False, "password too short", ip)
         return False, "Password must be at least 6 characters."
     if len(password) > 128:
+        append_user_log("register", username, False, "password too long", ip)
         return False, "Password is too long."
+    if username.lower() == SUPERADMIN_USERNAME.lower():
+        append_user_log("register", username, False, "reserved username", ip)
+        return False, "Username is reserved."
 
     with _LOCK:
         data = _load_users()
         for u in data["users"]:
             if str(u.get("username", "")).lower() == username.lower():
+                append_user_log("register", username, False, "already exists", ip)
                 return False, "Username already registered."
         data["users"].append(
             {
                 "username": username,
                 "password_hash": hash_password(password),
+                "role": "user",
                 "created_at": _now_iso(),
             }
         )
         _write_json(USERS_PATH, data)
+    append_user_log("register", username, True, "registered", ip)
     return True, "Registered successfully. You can log in."
 
 
-def authenticate(username: str, password: str) -> tuple[bool, str]:
+def authenticate(username: str, password: str, ip: str | None = None) -> tuple[bool, str]:
     username = (username or "").strip()
     password = password or ""
     with _LOCK:
@@ -123,8 +242,12 @@ def authenticate(username: str, password: str) -> tuple[bool, str]:
         for u in data["users"]:
             if str(u.get("username", "")).lower() == username.lower():
                 if verify_password(password, str(u.get("password_hash") or "")):
-                    return True, str(u["username"])
+                    name = str(u["username"])
+                    append_user_log("login", name, True, "ok", ip)
+                    return True, name
+                append_user_log("login", username, False, "bad password", ip)
                 return False, "Invalid username or password."
+    append_user_log("login", username, False, "unknown user", ip)
     return False, "Invalid username or password."
 
 
@@ -135,7 +258,6 @@ def create_session(username: str) -> str:
     cookie_val = f"{token}.{sig}"
     with _LOCK:
         data = _load_sessions()
-        # drop expired
         now = datetime.now(timezone.utc)
         keep: dict[str, Any] = {}
         for k, v in data["sessions"].items():
@@ -153,14 +275,19 @@ def create_session(username: str) -> str:
     return cookie_val
 
 
-def destroy_session(cookie_val: str | None) -> None:
+def destroy_session(cookie_val: str | None, ip: str | None = None) -> None:
     token = _token_from_cookie(cookie_val)
     if not token:
         return
+    username = ""
     with _LOCK:
         data = _load_sessions()
-        data["sessions"].pop(token, None)
+        sess = data["sessions"].pop(token, None)
+        if sess:
+            username = str(sess.get("username") or "")
         _write_json(SESSIONS_PATH, data)
+    if username:
+        append_user_log("logout", username, True, "ok", ip)
 
 
 def _token_from_cookie(cookie_val: str | None) -> str | None:
@@ -232,11 +359,26 @@ def read_json_body(environ) -> dict[str, Any]:
             return obj if isinstance(obj, dict) else {}
         except (UnicodeDecodeError, json.JSONDecodeError):
             return {}
-    # form-urlencoded
     qs = parse_qs(raw.decode("utf-8", errors="replace"))
     return {k: (v[0] if v else "") for k, v in qs.items()}
+
+
+def client_ip(environ_or_handler_headers=None, environ: dict | None = None) -> str:
+    env = environ
+    if env is None and isinstance(environ_or_handler_headers, dict) and "REMOTE_ADDR" in environ_or_handler_headers:
+        env = environ_or_handler_headers
+    if env:
+        fwd = env.get("HTTP_X_FORWARDED_FOR") or ""
+        if fwd:
+            return fwd.split(",")[0].strip()
+        return str(env.get("REMOTE_ADDR") or "")
+    return ""
 
 
 def current_user(environ) -> str | None:
     cookies = parse_cookies(environ)
     return user_from_cookie(cookies.get(COOKIE_NAME))
+
+
+# Seed admin account when module loads (local + Vercel)
+ensure_superadmin()

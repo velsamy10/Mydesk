@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>MyDesk — User logs</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml"/>
+<style>
+  :root {
+    --bg: #0f1419; --panel: #1a222c; --line: #2c3845;
+    --text: #e8eef4; --muted: #8b9aab; --green: #1faa6e; --red: #e04a4a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: "Segoe UI", system-ui, sans-serif; color: var(--text);
+    background: radial-gradient(1000px 500px at 10% -10%, #1a2836 0%, var(--bg) 55%);
+    min-height: 100vh;
+  }
+  header {
+    display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between;
+    padding: 18px 24px; border-bottom: 1px solid var(--line);
+  }
+  h1 { margin: 0; font-size: 1.25rem; font-weight: 700; }
+  .meta { color: var(--muted); font-size: 0.85rem; }
+  .btn {
+    background: #243040; color: var(--text); border: 1px solid var(--line);
+    padding: 8px 14px; border-radius: 6px; cursor: pointer; font-weight: 600; text-decoration: none;
+    display: inline-block;
+  }
+  .btn:hover { background: #2d3d50; }
+  main { padding: 20px 24px 40px; display: grid; gap: 16px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px;
+  }
+  h2 { margin: 0 0 12px; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+  th, td { padding: 8px 10px; border-bottom: 1px solid var(--line); text-align: left; }
+  th { color: var(--muted); font-weight: 600; font-size: 0.75rem; text-transform: uppercase; }
+  .ok { color: var(--green); font-weight: 650; }
+  .bad { color: var(--red); font-weight: 650; }
+  .err { background: #3a1c1c; border: 1px solid #7a3030; color: #ffb4b4; padding: 12px 14px; border-radius: 8px; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>MyDesk <span style="color:var(--muted);font-weight:600">user logs</span></h1>
+    <div class="meta" id="meta">Admin only</div>
+  </div>
+  <div style="display:flex;gap:10px;flex-wrap:wrap">
+    <a class="btn" href="/">Monitor</a>
+    <button class="btn" id="refreshBtn" type="button">Refresh logs</button>
+    <button class="btn" id="logoutBtn" type="button">Log out</button>
+  </div>
+</header>
+<main>
+  <div id="error" class="err" style="display:none"></div>
+  <section class="card">
+    <h2>Registered users</h2>
+    <div style="overflow-x:auto">
+      <table>
+        <thead><tr><th>Username</th><th>Role</th><th>Created</th></tr></thead>
+        <tbody id="users"></tbody>
+      </table>
+    </div>
+  </section>
+  <section class="card">
+    <h2>Activity log</h2>
+    <div style="overflow-x:auto">
+      <table>
+        <thead>
+          <tr>
+            <th>Time (UTC)</th>
+            <th>Action</th>
+            <th>User</th>
+            <th>Result</th>
+            <th>Detail</th>
+            <th>IP</th>
+          </tr>
+        </thead>
+        <tbody id="logs"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+async function ensureAdmin() {
+  const r = await fetch('/api/me', { credentials: 'same-origin' });
+  if (r.status === 401) { location.href = '/login.html'; return null; }
+  const d = await r.json();
+  if (!d.ok || !d.is_admin) {
+    $('error').style.display = 'block';
+    $('error').textContent = 'Admin access required.';
+    setTimeout(() => { location.href = '/'; }, 800);
+    return null;
+  }
+  $('meta').textContent = 'Signed in as ' + d.username + ' (admin)';
+  return d;
+}
+async function load() {
+  try {
+    const [ur, lr] = await Promise.all([
+      fetch('/api/admin/users', { credentials: 'same-origin' }),
+      fetch('/api/admin/logs?limit=300', { credentials: 'same-origin' }),
+    ]);
+    if (ur.status === 401 || lr.status === 401) { location.href = '/login.html'; return; }
+    if (ur.status === 403 || lr.status === 403) {
+      $('error').style.display = 'block';
+      $('error').textContent = 'Admin access required.';
+      return;
+    }
+    const users = await ur.json();
+    const logs = await lr.json();
+    $('users').innerHTML = (users.users || []).map(u =>
+      `<tr><td>${u.username || ''}</td><td>${u.role || 'user'}</td><td>${u.created_at || ''}</td></tr>`
+    ).join('') || '<tr><td colspan="3">No users</td></tr>';
+    $('logs').innerHTML = (logs.logs || []).map(e =>
+      `<tr>
+        <td>${e.ts || ''}</td>
+        <td>${e.action || ''}</td>
+        <td>${e.username || ''}</td>
+        <td class="${e.ok ? 'ok' : 'bad'}">${e.ok ? 'OK' : 'FAIL'}</td>
+        <td>${e.detail || ''}</td>
+        <td>${e.ip || ''}</td>
+      </tr>`
+    ).join('') || '<tr><td colspan="6">No logs yet</td></tr>';
+  } catch (e) {
+    $('error').style.display = 'block';
+    $('error').textContent = String(e);
+  }
+}
+$('refreshBtn').onclick = () => load();
+$('logoutBtn').onclick = async () => {
+  await fetch('/api/logout', { method: 'POST', credentials: 'same-origin' });
+  location.href = '/login.html';
+};
+(async () => {
+  const me = await ensureAdmin();
+  if (me) await load();
+})();
+</script>
+</body>
+</html>

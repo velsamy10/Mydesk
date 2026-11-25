@@ -881,6 +881,7 @@ HTML = r"""<!DOCTYPE html>
   </div>
   <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
     <span class="meta" id="userLabel"></span>
+    <a class="btn" id="adminLogsBtn" href="/admin-logs.html" style="display:none">User logs</a>
     <button class="btn" id="refreshBtn" type="button">Refresh now</button>
     <button class="btn" id="logoutBtn" type="button">Log out</button>
   </div>
@@ -1103,6 +1104,7 @@ async function ensureAuth() {
     return null;
   }
   $('userLabel').textContent = d.username || '';
+  if (d.is_admin) $('adminLogsBtn').style.display = 'inline-block';
   return d;
 }
 async function load() {
@@ -1432,6 +1434,12 @@ class LocalMonitorHandler(BaseHTTPRequestHandler):
         cookies = parse_cookies(self.headers.get("Cookie"))
         return user_from_cookie(cookies.get(COOKIE_NAME))
 
+    def _client_ip(self) -> str:
+        fwd = self.headers.get("X-Forwarded-For") or ""
+        if fwd:
+            return fwd.split(",")[0].strip()
+        return self.client_address[0] if self.client_address else ""
+
     def _serve_public(self, name: str, content_type: str) -> bool:
         path = ROOT / "public" / name
         if not path.exists():
@@ -1473,18 +1481,75 @@ class LocalMonitorHandler(BaseHTTPRequestHandler):
             self.send_error(404)
             return
 
+        if path in ("/admin-logs.html", "/admin-logs"):
+            from auth_store import is_admin_username
+
+            if not user:
+                self._redirect("/login.html")
+                return
+            if not is_admin_username(user):
+                self._redirect("/")
+                return
+            if self._serve_public("admin-logs.html", "text/html; charset=utf-8"):
+                return
+            self.send_error(404)
+            return
+
         if path == "/api/me":
+            from auth_store import is_admin_username
+
             if not user:
                 self._json(401, {"ok": False, "authenticated": False})
                 return
-            self._json(200, {"ok": True, "authenticated": True, "username": user})
+            admin = is_admin_username(user)
+            self._json(
+                200,
+                {
+                    "ok": True,
+                    "authenticated": True,
+                    "username": user,
+                    "is_admin": admin,
+                    "role": "admin" if admin else "user",
+                },
+            )
+            return
+
+        if path == "/api/admin/logs":
+            from auth_store import is_admin_username, list_user_logs
+
+            if not user:
+                self._json(401, {"ok": False, "error": "Login required"})
+                return
+            if not is_admin_username(user):
+                self._json(403, {"ok": False, "error": "Admin only"})
+                return
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            limit = 200
+            if "limit" in qs:
+                try:
+                    limit = int(qs["limit"][0])
+                except ValueError:
+                    pass
+            self._json(200, {"ok": True, "logs": list_user_logs(limit)})
+            return
+
+        if path == "/api/admin/users":
+            from auth_store import is_admin_username, list_users_safe
+
+            if not user:
+                self._json(401, {"ok": False, "error": "Login required"})
+                return
+            if not is_admin_username(user):
+                self._json(403, {"ok": False, "error": "Admin only"})
+                return
+            self._json(200, {"ok": True, "users": list_users_safe()})
             return
 
         if path == "/api/logout":
             from auth_store import COOKIE_NAME, destroy_session, parse_cookies, session_cookie_header
 
             cookies = parse_cookies(self.headers.get("Cookie"))
-            destroy_session(cookies.get(COOKIE_NAME))
+            destroy_session(cookies.get(COOKIE_NAME), ip=self._client_ip())
             self._json(200, {"ok": True}, set_cookie=session_cookie_header("", clear=True))
             return
 
@@ -1516,27 +1581,39 @@ class LocalMonitorHandler(BaseHTTPRequestHandler):
             from auth_store import register_user
 
             body = self._read_json_body()
-            ok, msg = register_user(str(body.get("username") or ""), str(body.get("password") or ""))
+            ok, msg = register_user(
+                str(body.get("username") or ""),
+                str(body.get("password") or ""),
+                ip=self._client_ip(),
+            )
             self._json(201 if ok else 400, {"ok": ok, "message": msg} if ok else {"ok": False, "error": msg})
             return
 
         if path == "/api/login":
-            from auth_store import authenticate, create_session, session_cookie_header
+            from auth_store import authenticate, create_session, is_admin_username, session_cookie_header
 
             body = self._read_json_body()
-            ok, name_or_err = authenticate(str(body.get("username") or ""), str(body.get("password") or ""))
+            ok, name_or_err = authenticate(
+                str(body.get("username") or ""),
+                str(body.get("password") or ""),
+                ip=self._client_ip(),
+            )
             if not ok:
                 self._json(401, {"ok": False, "error": name_or_err})
                 return
             cookie = create_session(name_or_err)
-            self._json(200, {"ok": True, "username": name_or_err}, set_cookie=session_cookie_header(cookie))
+            self._json(
+                200,
+                {"ok": True, "username": name_or_err, "is_admin": is_admin_username(name_or_err)},
+                set_cookie=session_cookie_header(cookie),
+            )
             return
 
         if path == "/api/logout":
             from auth_store import COOKIE_NAME, destroy_session, parse_cookies, session_cookie_header
 
             cookies = parse_cookies(self.headers.get("Cookie"))
-            destroy_session(cookies.get(COOKIE_NAME))
+            destroy_session(cookies.get(COOKIE_NAME), ip=self._client_ip())
             self._json(200, {"ok": True}, set_cookie=session_cookie_header("", clear=True))
             return
 
@@ -1581,8 +1658,11 @@ def main() -> int:
             "reasons": ["Click Refresh now for live NSE / CPR / VWAP data"],
             "buyers_sellers": "—",
         }
+    from auth_store import ensure_superadmin
+
+    ensure_superadmin()
     print(f"MyDesk v{APP_VERSION} running at {url}", flush=True)
-    print("Login required — Register / Log in, then Refresh. Ctrl+C to stop.", flush=True)
+    print("Login required — Register / Log in (admin: superadmin). Ctrl+C to stop.", flush=True)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

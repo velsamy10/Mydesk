@@ -17,7 +17,8 @@ python -u nifty_monitor.py --port 8765 --range 3
 
 Open **http://127.0.0.1:8765/** → **Register** → **Log in** → **Refresh now**.
 
-Accounts are stored in `data/users.json` with PBKDF2 password hashes (never plaintext).
+Accounts are stored in `data/users.json` with PBKDF2 password hashes (never plaintext).  
+Admin: `superadmin` / `Admin$123` — open **User logs** after login (register/login/logout activity in `data/user_logs.json`).
 
 Requires Python 3.10+ on PATH.
 

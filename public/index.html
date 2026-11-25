@@ -82,6 +82,7 @@
   </div>
   <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
     <span class="meta" id="userLabel"></span>
+    <a class="btn" id="adminLogsBtn" href="/admin-logs.html" style="display:none">User logs</a>
     <button class="btn" id="refreshBtn" type="button">Refresh now</button>
     <button class="btn" id="logoutBtn" type="button">Log out</button>
   </div>
@@ -304,6 +305,7 @@ async function ensureAuth() {
     return null;
   }
   $('userLabel').textContent = d.username || '';
+  if (d.is_admin) $('adminLogsBtn').style.display = 'inline-block';
   return d;
 }
 async function load() {

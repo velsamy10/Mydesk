@@ -10,10 +10,12 @@ agent-transcripts
 *.pine.txt
 _extract_html.py
 _sync_html.py
+_seed_admin_test.py
 README.md
 run_monitor.bat
 ExternalOptionChainService.md
 .git
 data/users.json
 data/sessions.json
+data/user_logs.json
 
