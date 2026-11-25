@@ -1,0 +1,140 @@
+//@version=5
+// LATEST | v1.1 | EMA 9/20 + Volume + Strike S/R | Intraday BUY CE / BUY PE
+// For 3m & 5m NIFTY. Signals on candle close. Clear labels on chart.
+// Index volume is often weak — volume filter OFF by default.
+indicator("v1.1 | EMA9/20 Strike S/R Intraday", shorttitle = "v1.1 EMA Strike", overlay = true, max_labels_count = 500, max_lines_count = 60)
+
+string G_EMA = "EMA"
+string G_VOL = "Volume"
+string G_SR  = "Strike S/R"
+string G_SIG = "BUY CE / BUY PE"
+string G_DAY = "Intraday"
+
+int   emaFastLen = input.int(9, "Fast EMA", minval = 1, group = G_EMA)
+int   emaSlowLen = input.int(20, "Slow EMA", minval = 1, group = G_EMA)
+
+int   volLen  = input.int(20, "Volume MA length", minval = 1, group = G_VOL)
+float volMult = input.float(1.1, "High volume (x average)", minval = 0.5, step = 0.1, group = G_VOL)
+bool  needVol = input.bool(false, "Require high volume (keep OFF on NIFTY index)", group = G_VOL)
+
+float strikeStep = input.float(50, "Strike step (NIFTY=50)", minval = 1, group = G_SR)
+int   srCount    = input.int(3, "Strikes each side of ATM", minval = 1, maxval = 10, group = G_SR)
+bool  showSR     = input.bool(true, "Show strike S/R lines", group = G_SR)
+bool  useStrike  = input.bool(true, "Also signal bounce from strike S/R", group = G_SR)
+
+string signalMode = input.string("Cross + Trend", "Signal mode", options = ["Cross only", "Cross + Trend", "Trend candle"], group = G_SIG, tooltip = "Cross = EMA9/20 cross. Cross + Trend = cross or reclaim EMA9 in trend. Trend candle = close vs EMAs.")
+bool  confirmClose = input.bool(true, "Signal only on candle close", group = G_SIG)
+int   cooldownBars = input.int(6, "Min bars between same-side signals", minval = 0, group = G_SIG)
+bool  onePerSide   = input.bool(false, "Max one CE and one PE per day", group = G_SIG)
+bool  showLabels   = input.bool(true, "Show BUY CE / BUY PE text labels", group = G_SIG)
+
+bool   useSession = input.bool(true, "Enforce intraday session", group = G_DAY)
+string entrySess = input.session("0915-1445", "New entries only (IST)", group = G_DAY)
+string sqOffSess = input.session("1515-1516", "Square-off alert (IST)", group = G_DAY)
+bool   showSqOff = input.bool(true, "Mark EXIT ALL at square-off", group = G_DAY)
+
+// ----- EMA + volume -----
+float ema9   = ta.ema(close, emaFastLen)
+float ema20  = ta.ema(close, emaSlowLen)
+float volAvg = ta.sma(volume, volLen)
+bool  hasVol = nz(volume) > 0 and nz(volAvg) > 0
+bool  volOk  = not needVol or (hasVol and volume > volAvg * volMult)
+
+plot(ema9,  "EMA 9",  color = color.teal,   linewidth = 2)
+plot(ema20, "EMA 20", color = color.orange, linewidth = 2)
+
+// ----- Strike S/R -----
+float atm = math.round(close / strikeStep) * strikeStep
+float nearestSup = close >= atm ? atm : atm - strikeStep
+float nearestRes = close >= atm ? atm + strikeStep : atm
+
+var line[] srLines = array.new_line()
+if barstate.islast and showSR
+    if array.size(srLines) > 0
+        for i = 0 to array.size(srLines) - 1
+            line.delete(array.get(srLines, i))
+        array.clear(srLines)
+    for i = -srCount to srCount
+        float lvl = atm + i * strikeStep
+        color c = i == 0 ? color.new(color.orange, 20) : (lvl <= close ? color.new(color.green, 55) : color.new(color.red, 55))
+        line ln = line.new(bar_index - 50, lvl, bar_index + 8, lvl, extend = extend.right, color = c, width = i == 0 ? 2 : 1, style = line.style_dotted)
+        array.push(srLines, ln)
+
+// ----- Session -----
+bool inEntry = not useSession or not na(time(timeframe.period, entrySess, "Asia/Kolkata"))
+bool atSqOff = useSession and not na(time(timeframe.period, sqOffSess, "Asia/Kolkata"))
+bool barOk   = not confirmClose or barstate.isconfirmed
+bool ready   = barOk and inEntry
+
+// ----- Core setups -----
+bool crossUp   = ta.crossover(ema9, ema20)
+bool crossDown = ta.crossunder(ema9, ema20)
+bool bullTrend = ema9 > ema20
+bool bearTrend = ema9 < ema20
+bool reclaimUp = ta.crossover(close, ema9) and bullTrend
+bool loseEma   = ta.crossunder(close, ema9) and bearTrend
+bool trendBullCandle = bullTrend and close > ema9 and close > open and close > close[1]
+bool trendBearCandle = bearTrend and close < ema9 and close < open and close < close[1]
+
+// Strike bounce: wick into support then close back up / into resistance then close back down
+bool bounceSup = useStrike and low <= nearestSup and close > nearestSup and close > open and bullTrend
+bool bounceRes = useStrike and high >= nearestRes and close < nearestRes and close < open and bearTrend
+
+bool rawCe = false
+bool rawPe = false
+if signalMode == "Cross only"
+    rawCe := crossUp
+    rawPe := crossDown
+else if signalMode == "Trend candle"
+    rawCe := trendBullCandle or bounceSup
+    rawPe := trendBearCandle or bounceRes
+else
+    // Cross + Trend (default)
+    rawCe := crossUp or reclaimUp or bounceSup
+    rawPe := crossDown or loseEma or bounceRes
+
+// ----- Throttle -----
+var int lastCeBar = na
+var int lastPeBar = na
+var int lastCeDay = na
+var int lastPeDay = na
+int dayId = year(time, "Asia/Kolkata") * 10000 + month(time, "Asia/Kolkata") * 100 + dayofmonth(time, "Asia/Kolkata")
+
+bool coolCe = na(lastCeBar) or (bar_index - lastCeBar) >= cooldownBars
+bool coolPe = na(lastPeBar) or (bar_index - lastPeBar) >= cooldownBars
+bool dayCe  = not onePerSide or na(lastCeDay) or lastCeDay != dayId
+bool dayPe  = not onePerSide or na(lastPeDay) or lastPeDay != dayId
+
+bool ceOk = ready and volOk and rawCe and coolCe and dayCe
+bool peOk = ready and volOk and rawPe and coolPe and dayPe
+
+if ceOk
+    lastCeBar := bar_index
+    lastCeDay := dayId
+if peOk
+    lastPeBar := bar_index
+    lastPeDay := dayId
+
+// ----- Visible calls (one label each — avoid duplicate text) -----
+plotshape(ceOk and not showLabels, title = "BUY CE mark", style = shape.triangleup, location = location.belowbar, color = color.new(#00c853, 0), size = size.small)
+plotshape(peOk and not showLabels, title = "BUY PE mark", style = shape.triangledown, location = location.abovebar, color = color.new(#e53935, 0), size = size.small)
+
+if showLabels and ceOk
+    label.new(bar_index, low, "BUY CE\nnext open", style = label.style_label_up, color = color.new(#00c853, 0), textcolor = color.white, size = size.normal)
+if showLabels and peOk
+    label.new(bar_index, high, "BUY PE\nnext open", style = label.style_label_down, color = color.new(#e53935, 0), textcolor = color.white, size = size.normal)
+
+bool sq = showSqOff and atSqOff and barstate.isconfirmed
+plotshape(sq, title = "EXIT ALL", style = shape.xcross, location = location.top, color = color.yellow, size = size.small, text = "EXIT ALL")
+
+alertcondition(ceOk, "BUY CE", "BUY CE — take call option next candle open")
+alertcondition(peOk, "BUY PE", "BUY PE — take put option next candle open")
+alertcondition(sq, "EXIT ALL", "Square-off — exit open CE/PE")
+
+// ----- Status -----
+var table tip = table.new(position.top_right, 1, 3)
+if barstate.islast
+    string st = not inEntry ? "WAIT (outside entry session)" : (bullTrend ? "Bias: BUY CE side (EMA9>EMA20)" : (bearTrend ? "Bias: BUY PE side (EMA9<EMA20)" : "Bias: flat"))
+    table.cell(tip, 0, 0, st, text_color = color.white, bgcolor = color.new(color.black, 25), text_size = size.small)
+    table.cell(tip, 0, 1, "ATM " + str.tostring(atm) + " | S " + str.tostring(nearestSup) + " | R " + str.tostring(nearestRes), text_color = color.white, bgcolor = color.new(color.black, 25), text_size = size.small)
+    table.cell(tip, 0, 2, "Vol filter: " + (needVol ? "ON" : "OFF") + " | Mode: " + signalMode, text_color = color.silver, bgcolor = color.new(color.black, 25), text_size = size.tiny)

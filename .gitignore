@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+monitor_stdout.log
+monitor_stderr.log
+option_chain_live.json
+option_chain_prev.json
+iv_session_baseline.json
+.vercel/
+.env
+.env.*
+*.log

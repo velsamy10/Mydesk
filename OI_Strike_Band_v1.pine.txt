@@ -1,0 +1,306 @@
+//@version=6
+// LATEST | v1 OI Strike Band | indicator | Pine Script v6
+// Shows Open Interest and day change for the centre strike and 5 strikes above / below it (11 rows).
+// Works on a NIFTY / BANKNIFTY option chart (auto-reads ticker) or on the index with manual inputs.
+// OI comes from TradingView "_OI" symbols only. Volume is never used in place of OI.
+// TradingView normally serves end-of-day OI for NSE options, so the change is previous session vs the one before it.
+// If a symbol has no OI feed, that cell shows "n/a". Live intraday OI still needs the NSE helper script.
+indicator("v1 | OI Strike Band", shorttitle = "v1 OI Band", overlay = true, max_labels_count = 10)
+
+string G_SETUP = "Setup"
+string G_OI    = "Open Interest"
+string G_SHOW  = "Display"
+
+string rootIn     = input.string("NIFTY", "Underlying root", options = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"], group = G_SETUP, tooltip = "Used when the chart is not an option contract, or when Auto parse is off.")
+string expiryIn   = input.string("261117", "Expiry (YYMMDD)", group = G_SETUP, tooltip = "Example: 17 Nov 2026 = 261117. Needed on an index chart. On an option chart Auto parse fills this.")
+float  strikeIn   = input.float(0.0, "Centre strike (0 = auto)", minval = 0.0, step = 50.0, group = G_SETUP, tooltip = "0 = read from the option ticker, or round the index close to the strike step.")
+float  stepIn     = input.float(0.0, "Strike step (0 = auto)", minval = 0.0, step = 25.0, group = G_SETUP, tooltip = "0 = 50 for NIFTY / FINNIFTY / MIDCPNIFTY, 100 for BANKNIFTY / SENSEX.")
+bool   autoParse  = input.bool(true, "Auto-read option ticker", group = G_SETUP, tooltip = "On a chart like NSE:NIFTY261117C24950, root / expiry / centre strike come from the ticker.")
+string exchIn     = input.string("NSE", "Exchange", options = ["NSE", "BSE"], group = G_SETUP)
+
+string oiMode     = input.string("End of day (1D)", "OI data", options = ["End of day (1D)", "Chart timeframe"], group = G_OI, tooltip = "End of day compares the last finished session with the one before it and does not repaint.")
+int    oiLen      = input.int(1, "Change lookback (bars, chart timeframe mode)", minval = 1, group = G_OI)
+bool   showLtp    = input.bool(false, "Also show CE / PE last price", group = G_OI)
+
+bool   showTable  = input.bool(true, "Show OI table", group = G_SHOW)
+string tablePos   = input.string("Bottom right", "Table position", options = ["Top right", "Bottom right", "Top left", "Bottom left"], group = G_SHOW)
+string dashSize   = input.string("Small", "Table text", options = ["Tiny", "Small", "Normal"], group = G_SHOW)
+
+// ---------------------------------------------------------------------
+// Parse option ticker: ROOT + YYMMDD + C|P + strike   e.g. NIFTY261117C24950
+// ---------------------------------------------------------------------
+string tk   = syminfo.ticker
+string tail = str.match(tk, "[0-9]{6}[CP][0-9.]+$")
+bool   parsed = autoParse and not na(tail) and str.length(tail) >= 8
+
+string pExpiry = parsed ? str.substring(tail, 0, 6) : ""
+string pSide   = parsed ? str.substring(tail, 6, 7) : ""
+float  pStrike = parsed ? str.tonumber(str.substring(tail, 7, str.length(tail))) : na
+string pRoot   = parsed ? str.substring(tk, 0, str.length(tk) - str.length(tail)) : ""
+
+string root   = parsed and str.length(pRoot) > 0 ? pRoot : rootIn
+string expiry = parsed ? pExpiry : expiryIn
+string exch   = str.upper(exchIn)
+
+float stepAuto = root == "BANKNIFTY" or root == "SENSEX" ? 100.0 : 50.0
+float step     = stepIn > 0 ? stepIn : stepAuto
+
+float spotRound = step > 0 ? math.round(close / step) * step : close
+float centre    = strikeIn > 0 ? strikeIn : not na(pStrike) ? pStrike : spotRound
+
+bool oiDaily = oiMode == "End of day (1D)"
+string oiTf  = oiDaily ? "1D" : timeframe.period
+
+f_sym(string side, float k) =>
+    exch + ":" + root + expiry + side + str.tostring(k, "#")
+
+// Dynamic request (series ticker allowed in Pine v6): [latest, previous bar, bar before that]
+f_oi(string oiTicker) =>
+    [a, b, c] = request.security(oiTicker, oiTf, [close, close[1], close[2]], lookahead = barmerge.lookahead_on, ignore_invalid_symbol = true)
+    float cur = oiDaily ? b : a
+    float ref = oiDaily ? c : a[oiLen]
+    [cur, ref]
+
+f_px(string pxTicker) =>
+    [a, b] = request.security(pxTicker, oiTf, [close, close[1]], lookahead = barmerge.lookahead_on, ignore_invalid_symbol = true)
+    oiDaily ? b : a
+
+f_chg(float cur, float ref) =>
+    not na(cur) and not na(ref) ? cur - ref : na
+
+f_pct(float cur, float ref) =>
+    not na(cur) and ref > 0 ? (cur - ref) / ref * 100.0 : na
+
+f_num(float v) =>
+    na(v) ? "n/a" : str.tostring(v, "#,###")
+
+f_dlt(float v) =>
+    na(v) ? "n/a" : (v > 0 ? "+" : "") + str.tostring(v, "#,###")
+
+f_pctTxt(float v) =>
+    na(v) ? "" : " (" + (v > 0 ? "+" : "") + str.tostring(v, "#.0") + "%)"
+
+f_pairOk(float ce, float pe) =>
+    ce > 0 and not na(pe)
+
+// Eleven strikes: centre ± 5
+float k0  = centre - 5.0 * step
+float k1  = centre - 4.0 * step
+float k2  = centre - 3.0 * step
+float k3  = centre - 2.0 * step
+float k4  = centre - 1.0 * step
+float k5  = centre
+float k6  = centre + 1.0 * step
+float k7  = centre + 2.0 * step
+float k8  = centre + 3.0 * step
+float k9  = centre + 4.0 * step
+float k10 = centre + 5.0 * step
+
+[c0a, c0b]   = f_oi(f_sym("C", k0) + "_OI")
+[c1a, c1b]   = f_oi(f_sym("C", k1) + "_OI")
+[c2a, c2b]   = f_oi(f_sym("C", k2) + "_OI")
+[c3a, c3b]   = f_oi(f_sym("C", k3) + "_OI")
+[c4a, c4b]   = f_oi(f_sym("C", k4) + "_OI")
+[c5a, c5b]   = f_oi(f_sym("C", k5) + "_OI")
+[c6a, c6b]   = f_oi(f_sym("C", k6) + "_OI")
+[c7a, c7b]   = f_oi(f_sym("C", k7) + "_OI")
+[c8a, c8b]   = f_oi(f_sym("C", k8) + "_OI")
+[c9a, c9b]   = f_oi(f_sym("C", k9) + "_OI")
+[c10a, c10b] = f_oi(f_sym("C", k10) + "_OI")
+
+[p0a, p0b]   = f_oi(f_sym("P", k0) + "_OI")
+[p1a, p1b]   = f_oi(f_sym("P", k1) + "_OI")
+[p2a, p2b]   = f_oi(f_sym("P", k2) + "_OI")
+[p3a, p3b]   = f_oi(f_sym("P", k3) + "_OI")
+[p4a, p4b]   = f_oi(f_sym("P", k4) + "_OI")
+[p5a, p5b]   = f_oi(f_sym("P", k5) + "_OI")
+[p6a, p6b]   = f_oi(f_sym("P", k6) + "_OI")
+[p7a, p7b]   = f_oi(f_sym("P", k7) + "_OI")
+[p8a, p8b]   = f_oi(f_sym("P", k8) + "_OI")
+[p9a, p9b]   = f_oi(f_sym("P", k9) + "_OI")
+[p10a, p10b] = f_oi(f_sym("P", k10) + "_OI")
+
+float ceL0  = showLtp ? f_px(f_sym("C", k0)) : na
+float ceL1  = showLtp ? f_px(f_sym("C", k1)) : na
+float ceL2  = showLtp ? f_px(f_sym("C", k2)) : na
+float ceL3  = showLtp ? f_px(f_sym("C", k3)) : na
+float ceL4  = showLtp ? f_px(f_sym("C", k4)) : na
+float ceL5  = showLtp ? f_px(f_sym("C", k5)) : na
+float ceL6  = showLtp ? f_px(f_sym("C", k6)) : na
+float ceL7  = showLtp ? f_px(f_sym("C", k7)) : na
+float ceL8  = showLtp ? f_px(f_sym("C", k8)) : na
+float ceL9  = showLtp ? f_px(f_sym("C", k9)) : na
+float ceL10 = showLtp ? f_px(f_sym("C", k10)) : na
+float peL0  = showLtp ? f_px(f_sym("P", k0)) : na
+float peL1  = showLtp ? f_px(f_sym("P", k1)) : na
+float peL2  = showLtp ? f_px(f_sym("P", k2)) : na
+float peL3  = showLtp ? f_px(f_sym("P", k3)) : na
+float peL4  = showLtp ? f_px(f_sym("P", k4)) : na
+float peL5  = showLtp ? f_px(f_sym("P", k5)) : na
+float peL6  = showLtp ? f_px(f_sym("P", k6)) : na
+float peL7  = showLtp ? f_px(f_sym("P", k7)) : na
+float peL8  = showLtp ? f_px(f_sym("P", k8)) : na
+float peL9  = showLtp ? f_px(f_sym("P", k9)) : na
+float peL10 = showLtp ? f_px(f_sym("P", k10)) : na
+
+float sumCe = (f_pairOk(c0a, p0a) ? c0a : 0.0) + (f_pairOk(c1a, p1a) ? c1a : 0.0) + (f_pairOk(c2a, p2a) ? c2a : 0.0) + (f_pairOk(c3a, p3a) ? c3a : 0.0) + (f_pairOk(c4a, p4a) ? c4a : 0.0) + (f_pairOk(c5a, p5a) ? c5a : 0.0) + (f_pairOk(c6a, p6a) ? c6a : 0.0) + (f_pairOk(c7a, p7a) ? c7a : 0.0) + (f_pairOk(c8a, p8a) ? c8a : 0.0) + (f_pairOk(c9a, p9a) ? c9a : 0.0) + (f_pairOk(c10a, p10a) ? c10a : 0.0)
+float sumPe = (f_pairOk(c0a, p0a) ? p0a : 0.0) + (f_pairOk(c1a, p1a) ? p1a : 0.0) + (f_pairOk(c2a, p2a) ? p2a : 0.0) + (f_pairOk(c3a, p3a) ? p3a : 0.0) + (f_pairOk(c4a, p4a) ? p4a : 0.0) + (f_pairOk(c5a, p5a) ? p5a : 0.0) + (f_pairOk(c6a, p6a) ? p6a : 0.0) + (f_pairOk(c7a, p7a) ? p7a : 0.0) + (f_pairOk(c8a, p8a) ? p8a : 0.0) + (f_pairOk(c9a, p9a) ? p9a : 0.0) + (f_pairOk(c10a, p10a) ? p10a : 0.0)
+int   nPair = (f_pairOk(c0a, p0a) ? 1 : 0) + (f_pairOk(c1a, p1a) ? 1 : 0) + (f_pairOk(c2a, p2a) ? 1 : 0) + (f_pairOk(c3a, p3a) ? 1 : 0) + (f_pairOk(c4a, p4a) ? 1 : 0) + (f_pairOk(c5a, p5a) ? 1 : 0) + (f_pairOk(c6a, p6a) ? 1 : 0) + (f_pairOk(c7a, p7a) ? 1 : 0) + (f_pairOk(c8a, p8a) ? 1 : 0) + (f_pairOk(c9a, p9a) ? 1 : 0) + (f_pairOk(c10a, p10a) ? 1 : 0)
+float bandPcr = sumCe > 0 ? sumPe / sumCe : na
+
+float sumCeChg = nz(f_chg(c0a, c0b)) + nz(f_chg(c1a, c1b)) + nz(f_chg(c2a, c2b)) + nz(f_chg(c3a, c3b)) + nz(f_chg(c4a, c4b)) + nz(f_chg(c5a, c5b)) + nz(f_chg(c6a, c6b)) + nz(f_chg(c7a, c7b)) + nz(f_chg(c8a, c8b)) + nz(f_chg(c9a, c9b)) + nz(f_chg(c10a, c10b))
+float sumPeChg = nz(f_chg(p0a, p0b)) + nz(f_chg(p1a, p1b)) + nz(f_chg(p2a, p2b)) + nz(f_chg(p3a, p3b)) + nz(f_chg(p4a, p4b)) + nz(f_chg(p5a, p5b)) + nz(f_chg(p6a, p6b)) + nz(f_chg(p7a, p7b)) + nz(f_chg(p8a, p8b)) + nz(f_chg(p9a, p9b)) + nz(f_chg(p10a, p10b))
+
+float maxCeK = na
+float maxCeV = na
+float maxPeK = na
+float maxPeV = na
+if not na(c0a)
+    maxCeK := k0
+    maxCeV := c0a
+if not na(c1a) and (na(maxCeV) or c1a > maxCeV)
+    maxCeK := k1
+    maxCeV := c1a
+if not na(c2a) and (na(maxCeV) or c2a > maxCeV)
+    maxCeK := k2
+    maxCeV := c2a
+if not na(c3a) and (na(maxCeV) or c3a > maxCeV)
+    maxCeK := k3
+    maxCeV := c3a
+if not na(c4a) and (na(maxCeV) or c4a > maxCeV)
+    maxCeK := k4
+    maxCeV := c4a
+if not na(c5a) and (na(maxCeV) or c5a > maxCeV)
+    maxCeK := k5
+    maxCeV := c5a
+if not na(c6a) and (na(maxCeV) or c6a > maxCeV)
+    maxCeK := k6
+    maxCeV := c6a
+if not na(c7a) and (na(maxCeV) or c7a > maxCeV)
+    maxCeK := k7
+    maxCeV := c7a
+if not na(c8a) and (na(maxCeV) or c8a > maxCeV)
+    maxCeK := k8
+    maxCeV := c8a
+if not na(c9a) and (na(maxCeV) or c9a > maxCeV)
+    maxCeK := k9
+    maxCeV := c9a
+if not na(c10a) and (na(maxCeV) or c10a > maxCeV)
+    maxCeK := k10
+    maxCeV := c10a
+if not na(p0a)
+    maxPeK := k0
+    maxPeV := p0a
+if not na(p1a) and (na(maxPeV) or p1a > maxPeV)
+    maxPeK := k1
+    maxPeV := p1a
+if not na(p2a) and (na(maxPeV) or p2a > maxPeV)
+    maxPeK := k2
+    maxPeV := p2a
+if not na(p3a) and (na(maxPeV) or p3a > maxPeV)
+    maxPeK := k3
+    maxPeV := p3a
+if not na(p4a) and (na(maxPeV) or p4a > maxPeV)
+    maxPeK := k4
+    maxPeV := p4a
+if not na(p5a) and (na(maxPeV) or p5a > maxPeV)
+    maxPeK := k5
+    maxPeV := p5a
+if not na(p6a) and (na(maxPeV) or p6a > maxPeV)
+    maxPeK := k6
+    maxPeV := p6a
+if not na(p7a) and (na(maxPeV) or p7a > maxPeV)
+    maxPeK := k7
+    maxPeV := p7a
+if not na(p8a) and (na(maxPeV) or p8a > maxPeV)
+    maxPeK := k8
+    maxPeV := p8a
+if not na(p9a) and (na(maxPeV) or p9a > maxPeV)
+    maxPeK := k9
+    maxPeV := p9a
+if not na(p10a) and (na(maxPeV) or p10a > maxPeV)
+    maxPeK := k10
+    maxPeV := p10a
+
+// ---------------------------------------------------------------------
+// Table (header + 11 strike rows + totals + max + note = 16)
+// ---------------------------------------------------------------------
+color C_TXT  = color.white
+color C_HDR  = color.silver
+color C_CE   = color.lime
+color C_PE   = color.red
+color C_NA   = color.gray
+color C_CTR  = color.yellow
+color C_UP   = color.lime
+color C_DN   = color.red
+
+string txtSize = dashSize == "Tiny" ? size.tiny : dashSize == "Small" ? size.small : size.normal
+int cols = showLtp ? 8 : 6
+var table tbl = table.new(position.bottom_right, cols, 16, bgcolor = color.new(color.black, 12), frame_color = color.new(color.gray, 40), frame_width = 1, border_color = color.new(color.gray, 70), border_width = 1)
+
+f_cell(int c, int r, string t, color fg, color bg) =>
+    table.cell(tbl, c, r, t, text_color = fg, bgcolor = bg, text_halign = text.align_center, text_size = txtSize)
+
+f_chgCol(float d) =>
+    na(d) ? C_NA : d > 0 ? C_UP : d < 0 ? C_DN : C_TXT
+
+f_row(int r, float k, float ce, float ceRef, float pe, float peRef, float ceLtp, float peLtp) =>
+    float ceD = f_chg(ce, ceRef)
+    float peD = f_chg(pe, peRef)
+    float ceP = f_pct(ce, ceRef)
+    float peP = f_pct(pe, peRef)
+    float pcr = ce > 0 and not na(pe) ? pe / ce : na
+    bool  ctr = math.abs(k - centre) < step * 0.1
+    color bg  = ctr ? color.new(color.yellow, 85) : color.new(color.black, 100)
+    color kFg = ctr ? C_CTR : C_TXT
+    f_cell(0, r, str.tostring(k, "#"), kFg, bg)
+    f_cell(1, r, f_num(ce), na(ce) ? C_NA : C_CE, bg)
+    f_cell(2, r, f_dlt(ceD) + f_pctTxt(ceP), f_chgCol(ceD), bg)
+    f_cell(3, r, f_num(pe), na(pe) ? C_NA : C_PE, bg)
+    f_cell(4, r, f_dlt(peD) + f_pctTxt(peP), f_chgCol(peD), bg)
+    f_cell(5, r, na(pcr) ? "n/a" : str.tostring(pcr, "#.00"), na(pcr) ? C_NA : C_TXT, bg)
+    if showLtp
+        f_cell(6, r, na(ceLtp) ? "n/a" : str.tostring(ceLtp, format.mintick), na(ceLtp) ? C_NA : C_CE, bg)
+        f_cell(7, r, na(peLtp) ? "n/a" : str.tostring(peLtp, format.mintick), na(peLtp) ? C_NA : C_PE, bg)
+
+if barstate.islast and showTable
+    table.set_position(tbl, tablePos == "Top right" ? position.top_right : tablePos == "Top left" ? position.top_left : tablePos == "Bottom left" ? position.bottom_left : position.bottom_right)
+    string modeTag = oiDaily ? "prev day vs day before" : "chart TF, lookback " + str.tostring(oiLen)
+    string head = root + " " + expiry + "  |  centre " + str.tostring(centre, "#") + "  ±5 × " + str.tostring(step, "#") + " (11 rows)  |  " + modeTag
+    table.cell(tbl, 0, 0, head, text_color = C_HDR, bgcolor = color.new(color.black, 100), text_halign = text.align_left, text_size = txtSize)
+    table.merge_cells(tbl, 0, 0, cols - 1, 0)
+
+    f_cell(0, 1, "Strike", C_HDR, color.new(color.gray, 70))
+    f_cell(1, 1, "CE OI", C_CE, color.new(color.gray, 70))
+    f_cell(2, 1, "CE Δ", C_CE, color.new(color.gray, 70))
+    f_cell(3, 1, "PE OI", C_PE, color.new(color.gray, 70))
+    f_cell(4, 1, "PE Δ", C_PE, color.new(color.gray, 70))
+    f_cell(5, 1, "PCR", C_HDR, color.new(color.gray, 70))
+    if showLtp
+        f_cell(6, 1, "CE LTP", C_CE, color.new(color.gray, 70))
+        f_cell(7, 1, "PE LTP", C_PE, color.new(color.gray, 70))
+
+    f_row(2,  k0,  c0a,  c0b,  p0a,  p0b,  ceL0,  peL0)
+    f_row(3,  k1,  c1a,  c1b,  p1a,  p1b,  ceL1,  peL1)
+    f_row(4,  k2,  c2a,  c2b,  p2a,  p2b,  ceL2,  peL2)
+    f_row(5,  k3,  c3a,  c3b,  p3a,  p3b,  ceL3,  peL3)
+    f_row(6,  k4,  c4a,  c4b,  p4a,  p4b,  ceL4,  peL4)
+    f_row(7,  k5,  c5a,  c5b,  p5a,  p5b,  ceL5,  peL5)
+    f_row(8,  k6,  c6a,  c6b,  p6a,  p6b,  ceL6,  peL6)
+    f_row(9,  k7,  c7a,  c7b,  p7a,  p7b,  ceL7,  peL7)
+    f_row(10, k8,  c8a,  c8b,  p8a,  p8b,  ceL8,  peL8)
+    f_row(11, k9,  c9a,  c9b,  p9a,  p9b,  ceL9,  peL9)
+    f_row(12, k10, c10a, c10b, p10a, p10b, ceL10, peL10)
+
+    string tot = "Band CE OI " + f_num(sumCe) + "   CE Δ " + f_dlt(sumCeChg) + "   |   PE OI " + f_num(sumPe) + "   PE Δ " + f_dlt(sumPeChg) + "   |   PCR " + (na(bandPcr) ? "n/a" : str.tostring(bandPcr, "#.00")) + " (" + str.tostring(nPair) + " pairs)"
+    table.cell(tbl, 0, 13, tot, text_color = C_TXT, bgcolor = color.new(color.gray, 80), text_halign = text.align_left, text_size = txtSize)
+    table.merge_cells(tbl, 0, 13, cols - 1, 13)
+
+    string maxTxt = "Max CE OI (resist) " + (na(maxCeK) ? "n/a" : str.tostring(maxCeK, "#") + " @ " + f_num(maxCeV)) + "   |   Max PE OI (support) " + (na(maxPeK) ? "n/a" : str.tostring(maxPeK, "#") + " @ " + f_num(maxPeV))
+    table.cell(tbl, 0, 14, maxTxt, text_color = C_HDR, bgcolor = color.new(color.black, 100), text_halign = text.align_left, text_size = txtSize)
+    table.merge_cells(tbl, 0, 14, cols - 1, 14)
+
+    bool anyOi = not na(c5a) or not na(p5a) or not na(c0a) or not na(p0a)
+    string note = anyOi ? (parsed ? "Parsed from chart ticker | ATM ±5 = 11 strikes" : "Using Setup inputs | ATM ±5 = 11 strikes") : "All n/a: TradingView has no _OI for these symbols. Use typed PCR in Options Assistant, or the NSE helper for live OI."
+    table.cell(tbl, 0, 15, note, text_color = anyOi ? C_HDR : color.orange, bgcolor = color.new(color.black, 100), text_halign = text.align_left, text_size = txtSize)
+    table.merge_cells(tbl, 0, 15, cols - 1, 15)

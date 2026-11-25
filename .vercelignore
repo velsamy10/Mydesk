@@ -1,0 +1,11 @@
+monitor_stdout.log
+monitor_stderr.log
+option_chain_live.json
+option_chain_prev.json
+iv_session_baseline.json
+__pycache__
+*.pyc
+.cursor
+agent-transcripts
+*.pine.txt
+_extract_html.py

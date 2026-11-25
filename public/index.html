@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>NIFTY Monitor v1</title>
+<style>
+  :root {
+    --bg: #0f1419;
+    --panel: #1a222c;
+    --line: #2c3845;
+    --text: #e8eef4;
+    --muted: #8b9aab;
+    --green: #1faa6e;
+    --red: #e04a4a;
+    --amber: #d4a017;
+    --ce: #1faa6e;
+    --pe: #e04a4a;
+    --wait: #c9a227;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: "Segoe UI", system-ui, sans-serif;
+    background: radial-gradient(1200px 600px at 10% -10%, #1a2836 0%, var(--bg) 55%);
+    color: var(--text); min-height: 100vh;
+  }
+  header {
+    display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between;
+    padding: 18px 24px; border-bottom: 1px solid var(--line);
+  }
+  header h1 { margin: 0; font-size: 1.25rem; font-weight: 650; letter-spacing: 0.02em; }
+  header .meta { color: var(--muted); font-size: 0.85rem; }
+  .btn {
+    background: #243040; color: var(--text); border: 1px solid var(--line);
+    padding: 8px 14px; border-radius: 6px; cursor: pointer; font-weight: 600;
+  }
+  .btn:hover { background: #2d3d50; }
+  main { padding: 20px 24px 40px; display: grid; gap: 16px; }
+  .grid { display: grid; gap: 16px; grid-template-columns: repeat(12, 1fr); }
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px;
+  }
+  .card h2 { margin: 0 0 12px; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); font-weight: 600; }
+  .span-4 { grid-column: span 4; } .span-6 { grid-column: span 6; } .span-8 { grid-column: span 8; } .span-12 { grid-column: span 12; }
+  @media (max-width: 980px) {
+    .span-4, .span-6, .span-8 { grid-column: span 12; }
+  }
+  .call {
+    font-size: 2.4rem; font-weight: 750; line-height: 1.1; margin: 4px 0 8px;
+  }
+  .call.ce { color: var(--ce); } .call.pe { color: var(--pe); } .call.wait { color: var(--wait); }
+  .kv { display: grid; grid-template-columns: 1fr auto; gap: 8px 12px; font-size: 0.95rem; }
+  .kv span:first-child { color: var(--muted); }
+  .pos { color: var(--green); font-weight: 650; }
+  .neg { color: var(--red); font-weight: 650; }
+  .neu { color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+  th, td { padding: 8px 10px; border-bottom: 1px solid var(--line); text-align: right; }
+  th { color: var(--muted); font-weight: 600; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; }
+  td:first-child, th:first-child { text-align: left; }
+  tr.centre { background: rgba(212, 160, 23, 0.12); }
+  ul.reasons { margin: 0; padding-left: 18px; color: var(--text); }
+  ul.reasons li { margin: 4px 0; color: #c5d0db; }
+  .err { background: #3a1c1c; border-color: #7a3030; color: #ffb4b4; padding: 12px 14px; border-radius: 8px; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 0.75rem; font-weight: 650; }
+  .badge.ok { background: rgba(31,170,110,.2); color: var(--green); }
+  .badge.bad { background: rgba(224,74,74,.2); color: var(--red); }
+  .badge.warn { background: rgba(212,160,23,.2); color: var(--amber); }
+  .liq-ok { color: var(--green); font-weight: 650; }
+  .liq-thin { color: var(--amber); font-weight: 650; }
+  .liq-poor { color: var(--red); font-weight: 650; }
+  .liq-unknown { color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>NIFTY Monitor <span style="color:var(--muted);font-weight:600">v1</span></h1>
+    <div class="meta" id="meta">Click Refresh now for live data (manual only)…</div>
+  </div>
+  <button class="btn" id="refreshBtn" type="button">Refresh now</button>
+</header>
+<main>
+  <div id="error" class="err" style="display:none"></div>
+  <div class="grid">
+    <section class="card span-4">
+      <h2>Call suggestion</h2>
+      <div class="call wait" id="call">WAIT</div>
+      <div class="kv">
+        <span>Strength</span><span id="strength">—</span>
+        <span>Score</span><span id="score">—</span>
+        <span>Buyers / sellers</span><span id="flow">—</span>
+      </div>
+    </section>
+    <section class="card span-4">
+      <h2>PCR (ATM ± band)</h2>
+      <div class="kv">
+        <span>PCR</span><span id="pcr">—</span>
+        <span>PCR change</span><span id="pcrChg">—</span>
+        <span>Direction</span><span id="pcrDir">—</span>
+        <span>CE Change OI</span><span id="ceChg">—</span>
+        <span>PE Change OI</span><span id="peChg">—</span>
+      </div>
+    </section>
+    <section class="card span-4">
+      <h2>CPR (prev day)</h2>
+      <div class="kv">
+        <span>Bias</span><span id="cprBias">—</span>
+        <span>Type</span><span id="cprType">—</span>
+        <span>Top / Pivot / Bot</span><span id="cprLevels">—</span>
+        <span>R1 / S1</span><span id="cprRS">—</span>
+        <span>Prev day</span><span id="cprDate">—</span>
+      </div>
+    </section>
+    <section class="card span-6">
+      <h2>Spot / VWAP / 5m–15m S-R</h2>
+      <div class="kv">
+        <span>Spot vs VWAP</span><span id="vwapDelta">—</span>
+        <span>VWAP</span><span id="vwapVal">—</span>
+        <span>5m Res / Sup</span><span id="sr5">—</span>
+        <span>15m Res / Sup</span><span id="sr15">—</span>
+        <span>Break / hold</span><span id="srBreak">—</span>
+      </div>
+    </section>
+    <section class="card span-6">
+      <h2>Implied volatility (ATM)</h2>
+      <div class="kv">
+        <span>ATM IV</span><span id="atmIv">—</span>
+        <span>CE IV / PE IV</span><span id="sideIv">—</span>
+        <span>IV change / vs open</span><span id="ivChg">—</span>
+        <span>Day IV percentile</span><span id="ivPct">—</span>
+        <span>IV warning</span><span id="ivWarn">—</span>
+      </div>
+    </section>
+    <section class="card span-4">
+      <h2>Session (IST)</h2>
+      <div class="kv">
+        <span>Phase</span><span id="sessPhase">—</span>
+        <span>Market open</span><span id="sessOpen">—</span>
+        <span>Entries OK</span><span id="sessEntry">—</span>
+        <span>Now</span><span id="sessNow">—</span>
+      </div>
+    </section>
+    <section class="card span-4">
+      <h2>India VIX</h2>
+      <div class="kv">
+        <span>VIX</span><span id="vixVal">—</span>
+        <span>Change</span><span id="vixChg">—</span>
+        <span>Elevated</span><span id="vixElev">—</span>
+      </div>
+    </section>
+    <section class="card span-4">
+      <h2>Premium risk (ATM ≈Δ0.5)</h2>
+      <div class="kv">
+        <span>CE / PE LTP</span><span id="premLtp">—</span>
+        <span>LTP Δsnap</span><span id="premChg">—</span>
+        <span>If spot +50</span><span id="premUp">—</span>
+        <span>If spot −50</span><span id="premDn">—</span>
+      </div>
+    </section>
+    <section class="card span-12">
+      <h2>Why this call</h2>
+      <ul class="reasons" id="reasons"><li>Waiting for data…</li></ul>
+    </section>
+    <section class="card span-12">
+      <h2>ATM / ITM liquidity — strike, order block, BAG / FAG</h2>
+      <p style="margin:0 0 12px;color:var(--muted);font-size:0.85rem" id="liqNote"></p>
+      <div style="overflow-x:auto">
+        <table>
+          <thead>
+            <tr>
+              <th>Leg</th>
+              <th>Strike</th>
+              <th>Mny</th>
+              <th>Bid×qty</th>
+              <th>Ask×qty</th>
+              <th>Sprd</th>
+              <th>Liq</th>
+              <th>Order block</th>
+              <th>BAG</th>
+              <th>FAG</th>
+              <th>Prefer</th>
+            </tr>
+          </thead>
+          <tbody id="liqKv"></tbody>
+        </table>
+      </div>
+      <div class="kv" style="margin-top:14px;max-width:720px">
+        <span>ATM CE depth (bid/ask qty)</span><span id="ceDepth">—</span>
+        <span>ATM CE spread</span><span id="ceSpread">—</span>
+        <span>ATM PE depth (bid/ask qty)</span><span id="peDepth">—</span>
+        <span>ATM PE spread</span><span id="peSpread">—</span>
+        <span>Liquidity warning</span><span id="liqWarn">—</span>
+      </div>
+    </section>
+    <section class="card span-12">
+      <h2>Strike band — OI &amp; Change OI</h2>
+      <div style="overflow-x:auto">
+        <table>
+          <thead>
+            <tr>
+              <th>Strike</th>
+              <th>CE OI</th>
+              <th>CE Δday</th>
+              <th>CE Δsnap</th>
+              <th>PE OI</th>
+              <th>PE Δday</th>
+              <th>PE Δsnap</th>
+              <th>PCR</th>
+            </tr>
+          </thead>
+          <tbody id="strikes"></tbody>
+        </table>
+      </div>
+    </section>
+    <section class="card span-12">
+      <h2>Strike band — bid / ask / spread</h2>
+      <div style="overflow-x:auto">
+        <table>
+          <thead>
+            <tr>
+              <th>Strike</th>
+              <th>CE mny</th>
+              <th>CE bid×qty</th>
+              <th>CE ask×qty</th>
+              <th>CE sprd</th>
+              <th>CE block</th>
+              <th>CE BAG</th>
+              <th>CE FAG</th>
+              <th>CE liq</th>
+              <th>PE mny</th>
+              <th>PE bid×qty</th>
+              <th>PE ask×qty</th>
+              <th>PE sprd</th>
+              <th>PE block</th>
+              <th>PE BAG</th>
+              <th>PE FAG</th>
+              <th>PE liq</th>
+            </tr>
+          </thead>
+          <tbody id="liqStrikes"></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+function chgClass(v) {
+  if (v === null || v === undefined || Number.isNaN(Number(v))) return 'neu';
+  const n = Number(v);
+  if (n > 0) return 'pos';
+  if (n < 0) return 'neg';
+  return 'neu';
+}
+function fmtChg(v) {
+  if (v === null || v === undefined) return 'n/a';
+  const n = Number(v);
+  if (Number.isNaN(n)) return 'n/a';
+  return (n > 0 ? '+' : '') + n.toLocaleString('en-IN');
+}
+function fmtNum(v) {
+  if (v === null || v === undefined) return '—';
+  return Number(v).toLocaleString('en-IN');
+}
+function fmtPct(v) {
+  if (v === null || v === undefined) return '—';
+  const n = Number(v);
+  return (n > 0 ? '+' : '') + n.toFixed(3);
+}
+function fmtPx(v) {
+  if (v === null || v === undefined) return '—';
+  return Number(v).toFixed(2);
+}
+function liqClass(g) {
+  if (g === 'ok') return 'liq-ok';
+  if (g === 'thin') return 'liq-thin';
+  if (g === 'poor') return 'liq-poor';
+  return 'liq-unknown';
+}
+function fmtDepth(bid, bq, ask, aq) {
+  return `${fmtPx(bid)}×${fmtNum(bq)} / ${fmtPx(ask)}×${fmtNum(aq)}`;
+}
+function fmtSpread(spr, pct, grade) {
+  if (spr === null || spr === undefined) return '—';
+  const g = grade || '';
+  return `<span class="${liqClass(g)}">${fmtPx(spr)} (${pct != null ? Number(pct).toFixed(2) + '%' : '—'}) ${g}</span>`;
+}
+async function load() {
+  try {
+    let d = window.__applyState || null;
+    window.__applyState = null;
+    if (!d) {
+      const r = await fetch('/api/state');
+      d = await r.json();
+    }
+    if (d.error) {
+      $('error').style.display = 'block';
+      $('error').textContent = d.error;
+    } else {
+      $('error').style.display = 'none';
+    }
+    const p = d.payload || {};
+    const agg = p.aggregates || {};
+    const sig = d.signal || {};
+    const cpr = d.cpr || {};
+    const call = sig.call || 'WAIT';
+    $('call').textContent = call;
+    $('call').className = 'call ' + (call === 'BUY CE' ? 'ce' : call === 'BUY PE' ? 'pe' : 'wait');
+    $('strength').textContent = sig.strength || '—';
+    $('score').textContent = sig.score ?? '—';
+    $('flow').textContent = sig.buyers_sellers || '—';
+
+    const pcr = agg.pcr ?? sig.pcr;
+    $('pcr').textContent = pcr != null ? Number(pcr).toFixed(3) : '—';
+    const pcrChg = agg.pcr_chg ?? sig.pcr_chg;
+    $('pcrChg').textContent = pcrChg != null ? fmtPct(pcrChg) : 'n/a';
+    $('pcrChg').className = chgClass(pcrChg);
+    $('pcrDir').textContent = agg.pcr_direction || sig.pcr_direction || '—';
+
+    const ceChg = sig.ce_chg ?? agg.ce_chg_oi ?? agg.ce_chg_day_total;
+    const peChg = sig.pe_chg ?? agg.pe_chg_oi ?? agg.pe_chg_day_total;
+    $('ceChg').textContent = fmtChg(ceChg);
+    $('ceChg').className = chgClass(ceChg);
+    $('peChg').textContent = fmtChg(peChg);
+    $('peChg').className = chgClass(peChg);
+
+    if (cpr.error) {
+      $('cprBias').textContent = 'CPR unavailable';
+      $('cprType').textContent = cpr.error;
+      $('cprLevels').textContent = '—';
+      $('cprRS').textContent = '—';
+      $('cprDate').textContent = '—';
+    } else {
+      $('cprBias').textContent = cpr.bias || '—';
+      $('cprType').textContent = (cpr.type || '—') + (cpr.width_pct != null ? ` (${cpr.width_pct}%)` : '');
+      $('cprLevels').textContent = `${cpr.cpr_top} / ${cpr.pivot} / ${cpr.cpr_bot}`;
+      $('cprRS').textContent = `${cpr.r1} / ${cpr.s1}`;
+      $('cprDate').textContent = cpr.prev_date || '—';
+    }
+
+    const vwap = d.vwap_ctx || sig.vwap_ctx || {};
+    if (vwap.error) {
+      $('vwapDelta').textContent = 'VWAP unavailable';
+      $('vwapDelta').className = 'neu';
+      $('vwapVal').textContent = vwap.error;
+      $('sr5').textContent = '—';
+      $('sr15').textContent = '—';
+      $('srBreak').textContent = '—';
+    } else {
+      const vs = vwap.spot_vs_vwap;
+      $('vwapDelta').textContent = vs != null ? ((vs > 0 ? '+' : '') + Number(vs).toFixed(2) + (vwap.above_vwap ? ' (above)' : vwap.below_vwap ? ' (below)' : '')) : '—';
+      $('vwapDelta').className = vs > 0 ? 'pos' : vs < 0 ? 'neg' : 'neu';
+      $('vwapVal').textContent = vwap.vwap != null ? Number(vwap.vwap).toFixed(2) : '—';
+      $('sr5').textContent = `${vwap.res_5m ?? '—'} / ${vwap.sup_5m ?? '—'}`;
+      $('sr15').textContent = `${vwap.res_15m ?? '—'} / ${vwap.sup_15m ?? '—'}`;
+      const br = [];
+      if (vwap.broke_res_5m) br.push('Broke 5m res');
+      if (vwap.broke_res_15m) br.push('Broke 15m res');
+      if (vwap.broke_sup_5m) br.push('Broke 5m sup');
+      if (vwap.broke_sup_15m) br.push('Broke 15m sup');
+      if (vwap.holds_above_res_5m && !vwap.broke_res_5m) br.push('Holds > 5m res');
+      if (vwap.holds_below_sup_5m && !vwap.broke_sup_5m) br.push('Holds < 5m sup');
+      $('srBreak').textContent = br.length ? br.join(' · ') : 'None';
+      $('srBreak').className = (vwap.broke_res_5m || vwap.broke_res_15m) ? 'pos' : (vwap.broke_sup_5m || vwap.broke_sup_15m) ? 'neg' : 'neu';
+    }
+
+    const iv = (p.iv) || (agg.iv) || sig.iv || {};
+    const ivBase = iv.baseline || {};
+    $('atmIv').textContent = iv.atm_iv != null ? Number(iv.atm_iv).toFixed(2) + '%' : '—';
+    $('atmIv').className = iv.iv_rich ? 'liq-poor' : 'neu';
+    $('sideIv').textContent = `${iv.ce_iv != null ? Number(iv.ce_iv).toFixed(2) + '%' : '—'} / ${iv.pe_iv != null ? Number(iv.pe_iv).toFixed(2) + '%' : '—'}`;
+    const ivChg = iv.atm_iv_chg;
+    const vsOpen = ivBase.vs_open;
+    $('ivChg').textContent = [
+      ivChg != null ? ('snap ' + (ivChg > 0 ? '+' : '') + Number(ivChg).toFixed(2)) : null,
+      vsOpen != null ? ('open ' + (vsOpen > 0 ? '+' : '') + Number(vsOpen).toFixed(2)) : null
+    ].filter(Boolean).join(' · ') || 'n/a';
+    $('ivChg').className = chgClass(ivChg != null ? ivChg : vsOpen);
+    $('ivPct').textContent = ivBase.day_percentile != null ? Number(ivBase.day_percentile).toFixed(0) + '% of today' : '—';
+    const ivWarn = sig.iv_warning || (iv.iv_rich ? 'IV rich — costly premium' : null);
+    $('ivWarn').textContent = ivWarn || 'None';
+    $('ivWarn').className = ivWarn ? 'liq-poor' : 'neu';
+
+    const sess = d.session || sig.session || {};
+    $('sessPhase').textContent = sess.phase || '—';
+    $('sessPhase').className = sess.entry_ok ? 'pos' : sess.market_open ? 'liq-thin' : 'neu';
+    $('sessOpen').textContent = sess.market_open == null ? '—' : (sess.market_open ? 'Yes' : 'No');
+    $('sessEntry').textContent = sess.entry_ok == null ? '—' : (sess.entry_ok ? 'Yes' : 'No');
+    $('sessNow').textContent = sess.now_ist || '—';
+
+    const vix = d.vix || sig.vix || {};
+    if (vix.error) {
+      $('vixVal').textContent = 'unavailable';
+      $('vixChg').textContent = vix.error;
+      $('vixElev').textContent = '—';
+    } else {
+      $('vixVal').textContent = vix.vix != null ? Number(vix.vix).toFixed(2) : '—';
+      $('vixVal').className = vix.elevated ? 'liq-poor' : 'neu';
+      $('vixChg').textContent = vix.vix_chg != null ? ((vix.vix_chg > 0 ? '+' : '') + Number(vix.vix_chg).toFixed(2) + (vix.vix_chg_pct != null ? ` (${vix.vix_chg_pct}%)` : '')) : '—';
+      $('vixChg').className = chgClass(vix.vix_chg);
+      $('vixElev').textContent = vix.elevated ? 'Yes — caution' : 'No';
+      $('vixElev').className = vix.elevated ? 'liq-poor' : 'pos';
+    }
+
+    const prem = d.premium || sig.premium || {};
+    if (prem.error) {
+      $('premLtp').textContent = '—';
+      $('premChg').textContent = prem.error;
+      $('premUp').textContent = '—';
+      $('premDn').textContent = '—';
+    } else {
+      $('premLtp').textContent = `${prem.ce_ltp ?? '—'} / ${prem.pe_ltp ?? '—'}`;
+      $('premChg').innerHTML = `<span class="${chgClass(prem.ce_ltp_chg_snap)}">${fmtChg(prem.ce_ltp_chg_snap)}</span> / <span class="${chgClass(prem.pe_ltp_chg_snap)}">${fmtChg(prem.pe_ltp_chg_snap)}</span>`;
+      $('premUp').textContent = `CE ~${prem.est_ce_pnl_spot_up_50} · PE ~${prem.est_pe_pnl_spot_up_50}`;
+      $('premDn').textContent = `CE ~${prem.est_ce_pnl_spot_down_50} · PE ~${prem.est_pe_pnl_spot_down_50}`;
+    }
+
+    const reasons = sig.reasons || [];
+    $('reasons').innerHTML = reasons.length ? reasons.map(x => `<li>${x}</li>`).join('') : '<li>No reasons yet</li>';
+
+    const centre = p.centre_strike ?? p.atm_strike;
+    const rows = p.strikes || [];
+    $('strikes').innerHTML = rows.map(r => {
+      const k = r.strike;
+      const isC = centre != null && Math.abs(Number(k) - Number(centre)) < 0.1;
+      const pcrS = (r.ce_oi > 0 && r.pe_oi != null) ? (r.pe_oi / r.ce_oi).toFixed(2) : 'n/a';
+      return `<tr class="${isC ? 'centre' : ''}">
+        <td>${isC ? '★ ' : ''}${k}</td>
+        <td>${fmtNum(r.ce_oi)}</td>
+        <td class="${chgClass(r.ce_chg_day)}">${fmtChg(r.ce_chg_day)}</td>
+        <td class="${chgClass(r.ce_chg_snap)}">${fmtChg(r.ce_chg_snap)}</td>
+        <td>${fmtNum(r.pe_oi)}</td>
+        <td class="${chgClass(r.pe_chg_day)}">${fmtChg(r.pe_chg_day)}</td>
+        <td class="${chgClass(r.pe_chg_snap)}">${fmtChg(r.pe_chg_snap)}</td>
+        <td>${pcrS}</td>
+      </tr>`;
+    }).join('') || '<tr><td colspan="8">No strike data</td></tr>';
+
+    const liq = p.liquidity || (agg.liquidity) || sig.liquidity || {};
+    const atmCe = liq.atm_ce || {};
+    const atmPe = liq.atm_pe || {};
+    let itmCeList = Array.isArray(liq.itm_ce) ? liq.itm_ce.filter(Boolean) : [];
+    let itmPeList = Array.isArray(liq.itm_pe) ? liq.itm_pe.filter(Boolean) : [];
+    if (!itmCeList.length) itmCeList = [liq.nearest_itm_ce, liq.second_itm_ce].filter(Boolean);
+    if (!itmPeList.length) itmPeList = [liq.nearest_itm_pe, liq.second_itm_pe].filter(Boolean);
+    $('ceDepth').textContent = `${fmtNum(atmCe.bid_qty)} / ${fmtNum(atmCe.ask_qty)}`;
+    $('peDepth').textContent = `${fmtNum(atmPe.bid_qty)} / ${fmtNum(atmPe.ask_qty)}`;
+    $('ceSpread').innerHTML = fmtSpread(atmCe.spread, atmCe.spread_pct, atmCe.liquidity);
+    $('peSpread').innerHTML = fmtSpread(atmPe.spread, atmPe.spread_pct, atmPe.liquidity);
+    const warn = sig.liquidity_warning;
+    $('liqWarn').textContent = warn || 'None';
+    $('liqWarn').className = warn ? 'liq-poor' : 'neu';
+
+    function preferClass(p) {
+      if (p === 'BAG') return 'liq-ok';
+      if (p === 'FAG') return 'liq-thin';
+      if (p === 'SKIP') return 'liq-poor';
+      return 'neu';
+    }
+    function liqOrderRow(label, q) {
+      if (!q || q.strike == null) return '';
+      const prefer = q.order_prefer || '—';
+      const title = q.order_note ? ` title="${String(q.order_note).replace(/"/g, '&quot;')}"` : '';
+      return `<tr${title}>
+        <td>${label}</td>
+        <td><strong>${Number(q.strike)}</strong></td>
+        <td>${q.moneyness || '—'}</td>
+        <td>${fmtPx(q.bid)}×${fmtNum(q.bid_qty)}</td>
+        <td>${fmtPx(q.ask)}×${fmtNum(q.ask_qty)}</td>
+        <td>${fmtPx(q.spread)}${q.spread_pct != null ? ' (' + Number(q.spread_pct).toFixed(2) + '%)' : ''}</td>
+        <td class="${liqClass(q.liquidity)}">${q.liquidity || '—'}</td>
+        <td>${q.order_block || (fmtPx(q.bid) + ' – ' + fmtPx(q.ask))}</td>
+        <td class="liq-ok">${q.bag != null ? fmtPx(q.bag) : '—'}</td>
+        <td class="liq-thin">${q.fag != null ? fmtPx(q.fag) : '—'}</td>
+        <td class="${preferClass(prefer)}">${prefer}</td>
+      </tr>`;
+    }
+    const liqBody = [];
+    liqBody.push(liqOrderRow('ATM CE', atmCe));
+    liqBody.push(liqOrderRow('ATM PE', atmPe));
+    itmCeList.forEach((q, i) => liqBody.push(liqOrderRow(`ITM CE #${i + 1}`, q)));
+    itmPeList.forEach((q, i) => liqBody.push(liqOrderRow(`ITM PE #${i + 1}`, q)));
+    $('liqKv').innerHTML = liqBody.join('') || '<tr><td colspan="11">No liquidity data</td></tr>';
+    $('liqNote').textContent = liq.note || 'Order block = bid–ask zone. BAG = Buy At Gap (limit near mid). FAG = Fill At Ask. Prefer BAG; FAG only if urgent.';
+
+    $('liqStrikes').innerHTML = rows.map(r => {
+      const k = r.strike;
+      const isC = centre != null && Math.abs(Number(k) - Number(centre)) < 0.1;
+      return `<tr class="${isC ? 'centre' : ''}">
+        <td>${isC ? '★ ' : ''}${k}</td>
+        <td>${r.ce_moneyness || '—'}</td>
+        <td>${fmtPx(r.ce_bid)}×${fmtNum(r.ce_bid_qty)}</td>
+        <td>${fmtPx(r.ce_ask)}×${fmtNum(r.ce_ask_qty)}</td>
+        <td>${fmtPx(r.ce_spread)}</td>
+        <td>${r.ce_order_block || '—'}</td>
+        <td class="liq-ok">${r.ce_bag != null ? fmtPx(r.ce_bag) : '—'}</td>
+        <td class="liq-thin">${r.ce_fag != null ? fmtPx(r.ce_fag) : '—'}</td>
+        <td class="${liqClass(r.ce_liquidity)}">${r.ce_liquidity || '—'}</td>
+        <td>${r.pe_moneyness || '—'}</td>
+        <td>${fmtPx(r.pe_bid)}×${fmtNum(r.pe_bid_qty)}</td>
+        <td>${fmtPx(r.pe_ask)}×${fmtNum(r.pe_ask_qty)}</td>
+        <td>${fmtPx(r.pe_spread)}</td>
+        <td>${r.pe_order_block || '—'}</td>
+        <td class="liq-ok">${r.pe_bag != null ? fmtPx(r.pe_bag) : '—'}</td>
+        <td class="liq-thin">${r.pe_fag != null ? fmtPx(r.pe_fag) : '—'}</td>
+        <td class="${liqClass(r.pe_liquidity)}">${r.pe_liquidity || '—'}</td>
+      </tr>`;
+    }).join('') || '<tr><td colspan="17">No strike data</td></tr>';
+
+    const fresh = p.freshness || '—';
+    const usable = p.usable_for_signals ? '<span class="badge ok">usable</span>' : '<span class="badge bad">not usable</span>';
+    const freshBadge = fresh === 'fresh' ? '<span class="badge ok">fresh</span>' : `<span class="badge warn">${fresh}</span>`;
+    const atmLiq = atmCe.liquidity || atmPe.liquidity;
+    const liqBadge = atmLiq === 'ok' ? '<span class="badge ok">ATM liq ok</span>'
+      : atmLiq === 'thin' ? '<span class="badge warn">ATM thin</span>'
+      : atmLiq === 'poor' ? '<span class="badge bad">ATM poor liq</span>' : '';
+    const sessBadge = (d.session || {}).entry_ok ? '<span class="badge ok">entries OK</span>'
+      : (d.session || {}).market_open ? '<span class="badge warn">live / no new entries</span>'
+      : '<span class="badge bad">after hours</span>';
+    $('meta').innerHTML = `v1 · Updated ${d.updated_at || '—'} · Spot ${p.spot ?? '—'} · ATM ${p.atm_strike ?? '—'} · Expiry ${p.expiry || '—'} · NSE ${p.chain_timestamp || '—'} · ${freshBadge} ${usable} ${liqBadge} ${sessBadge}`;
+  } catch (e) {
+    $('error').style.display = 'block';
+    $('error').textContent = String(e);
+  }
+}
+$('refreshBtn').onclick = async () => {
+  $('refreshBtn').disabled = true;
+  $('meta').textContent = 'Fetching NSE / CPR / VWAP…';
+  try {
+    const r = await fetch('/api/refresh', { method: 'POST' });
+    const d = await r.json();
+    if (d && (d.signal || d.payload !== undefined)) {
+      window.__applyState = d;
+    }
+    await load();
+  } catch (e) {
+    $('error').style.display = 'block';
+    $('error').textContent = String(e);
+  }
+  $('refreshBtn').disabled = false;
+};
+// Manual refresh only — no timed /api hits
+load();
+</script>
+</body>
+</html>

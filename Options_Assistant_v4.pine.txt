@@ -1,0 +1,768 @@
+//@version=6
+// LATEST | v4 Options Assistant | indicator | Pine Script v6
+// Chart   : NIFTY / BANKNIFTY CE or PE strike chart, or the index / futures. Built for 3-minute candles.
+// Calls   : BUY CE / BUY PE / WAIT, decided only after the candle closes. Place at the next candle open.
+// Always  : 9/20 EMA, volume, pivot support / resistance, ATR stop and two targets.
+// OI / PCR: read from TradingView "_OI" symbols when they exist. Set the CE and PE symbols in the inputs.
+//           TradingView normally serves end-of-day OI for exchange contracts, so by default OI and PCR
+//           describe the previous session and act as a daily bias.
+//           Volume is never used in place of OI. Missing data shows as "Unavailable" and is skipped.
+// Strike  : on a CE chart the trend is the CE premium, on a PE chart it is the PE premium.
+// v2      : skips a call on a stretched candle (close far past the 9 EMA, or a long wick against the call).
+//           A skipped call shows as a grey "Skip CE" / "Skip PE" label. Everything else is the same as v1.
+// v3      : also skips a call when the stop is too wide: over 6% of the premium on a strike chart,
+//           over 50 points on an index / futures chart. Everything else is the same as v2.
+// v4      : paste the NSE bridge line from external_option_chain_service.py into settings.
+//           Fills PCR, PCR direction, CE/PE Change OI. Blocks calls when USABLE=0 or FRESH=stale.
+indicator("v4 | Options Assistant", shorttitle = "v4 Options Assistant", overlay = true, max_lines_count = 50, max_labels_count = 300, max_boxes_count = 50)
+
+// =====================================================================
+// INPUTS
+// =====================================================================
+string G_CHART = "Chart"
+string G_EMA   = "EMA"
+string G_TREND = "Trend score"
+string G_VOL   = "Volume"
+string G_SR    = "Support / Resistance"
+string G_OI    = "Open Interest"
+string G_PCR   = "PCR / NSE Bridge"
+string G_SIG   = "Call filters"
+string G_RISK  = "Entry / Stop / Target"
+string G_SHOW  = "Display"
+
+string chartKindIn = input.string("Auto", "This chart is", options = ["Auto", "Index / Futures", "CE strike", "PE strike"], group = G_CHART, tooltip = "Auto reads the ticker (for example NIFTY261117C25000). Set it by hand if the dashboard shows the wrong chart type.")
+string sideMode    = input.string("This option only", "Calls on a strike chart", options = ["This option only", "Both CE and PE"], group = G_CHART, tooltip = "A falling premium can be time decay, so by default a CE chart gives only BUY CE and a PE chart gives only BUY PE. The index or futures chart always gives both.")
+
+int   emaFastLen = input.int(9, "Fast EMA", minval = 1, group = G_EMA)
+int   emaSlowLen = input.int(20, "Slow EMA", minval = 2, group = G_EMA)
+int   slopeLen   = input.int(3, "EMA slope lookback (bars)", minval = 1, group = G_EMA)
+int   atrLen     = input.int(14, "ATR length", minval = 1, group = G_EMA)
+float gapAtr     = input.float(0.1, "Sideways when the 9/20 gap is under (x ATR)", minval = 0.0, step = 0.05, group = G_EMA)
+
+bool  fEma       = input.bool(true, "Use 9 EMA vs 20 EMA", group = G_TREND)
+bool  fSlope     = input.bool(true, "Use EMA slope", group = G_TREND)
+bool  fPrice     = input.bool(true, "Use price vs both EMAs", group = G_TREND)
+bool  fVol       = input.bool(true, "Use volume balance (up vs down candles)", group = G_TREND)
+bool  fPcr       = input.bool(true, "Use PCR direction (when available)", group = G_TREND)
+bool  fOi        = input.bool(true, "Use OI buildup (when available)", group = G_TREND)
+float volBalMult = input.float(1.2, "Volume balance edge (x)", minval = 1.0, step = 0.1, group = G_TREND)
+float trendThr   = input.float(0.4, "Score for Bullish / Bearish (0 to 1)", minval = 0.05, maxval = 1.0, step = 0.05, group = G_TREND)
+float strongThr  = input.float(0.75, "Score for Strong Bullish / Bearish (0 to 1)", minval = 0.05, maxval = 1.0, step = 0.05, group = G_TREND)
+
+int   volLen      = input.int(20, "Volume average length", minval = 1, group = G_VOL)
+float volHighMult = input.float(1.2, "High volume (x average)", minval = 0.1, step = 0.1, group = G_VOL)
+float volLowMult  = input.float(0.7, "Low volume (x average)", minval = 0.1, step = 0.1, group = G_VOL)
+
+int   pivLeft       = input.int(5, "Pivot bars left", minval = 1, group = G_SR)
+int   pivRight      = input.int(5, "Pivot bars right", minval = 1, group = G_SR)
+float zoneAtr       = input.float(0.25, "Zone half-width (x ATR)", minval = 0.01, step = 0.05, group = G_SR)
+float mergeAtr      = input.float(0.5, "Merge levels closer than (x ATR)", minval = 0.0, step = 0.1, group = G_SR)
+float brkAtr        = input.float(0.1, "Close beyond a level by (x ATR) for a break", minval = 0.0, step = 0.05, group = G_SR)
+int   maxLevels     = input.int(12, "Levels to remember", minval = 4, maxval = 30, group = G_SR)
+int   levelAge      = input.int(600, "Forget levels older than (bars)", minval = 50, group = G_SR)
+int   strongTouches = input.int(2, "Rejections needed for a strong level", minval = 1, group = G_SR)
+int   touchGap      = input.int(5, "Bars between counted rejections", minval = 1, group = G_SR)
+
+bool   useOi    = input.bool(true, "Read Open Interest from TradingView", group = G_OI, tooltip = "Turn this off if the chart shows a data error for an OI symbol.")
+string oiMode   = input.string("End of day (1D)", "OI data", options = ["End of day (1D)", "Chart timeframe"], group = G_OI, tooltip = "End of day compares the last finished session with the one before it and does not repaint. Chart timeframe works only where TradingView serves intraday OI for the symbol.")
+string ceSym1   = input.symbol("", "CE symbol 1", group = G_OI, tooltip = "Leave blank on a CE strike chart to use the chart itself. Example: NSE:NIFTY261117C25000")
+string peSym1   = input.symbol("", "PE symbol 1", group = G_OI, tooltip = "Leave blank on a PE strike chart to use the chart itself. Example: NSE:NIFTY261117P25000")
+string ceSym2   = input.symbol("", "CE symbol 2 (PCR only)", group = G_OI)
+string peSym2   = input.symbol("", "PE symbol 2 (PCR only)", group = G_OI)
+string ceSym3   = input.symbol("", "CE symbol 3 (PCR only)", group = G_OI)
+string peSym3   = input.symbol("", "PE symbol 3 (PCR only)", group = G_OI)
+int    oiLen    = input.int(5, "OI change lookback (bars, chart timeframe mode)", minval = 1, group = G_OI)
+float  oiMinPct = input.float(0.3, "Min OI change to count (%)", minval = 0.01, step = 0.1, group = G_OI)
+
+string bridgePaste = input.text_area("", "NSE Bridge paste", group = G_PCR, tooltip = "Paste the full BRIDGE PASTE line from external_option_chain_service.py here. Example: PCR=0.83|DIR=falling|CE_dOI=1200|PE_dOI=1800|ATM=25150|SPOT=25144|FRESH=fresh|USABLE=1|TS=...")
+bool   requireBridgeOk = input.bool(true, "Block calls if bridge says stale / not usable", group = G_PCR, tooltip = "When a bridge line is pasted, WAIT if USABLE=0 or FRESH=stale.")
+float pcrManual  = input.float(0.0, "Typed PCR (0 = off, used if bridge has no PCR)", minval = 0.0, step = 0.01, group = G_PCR, tooltip = "Fallback only. Prefer the Bridge paste field above.")
+float pcrBullThr = input.float(1.1, "PCR at or above this is bullish", minval = 0.1, step = 0.05, group = G_PCR)
+float pcrBearThr = input.float(0.9, "PCR at or below this is bearish", minval = 0.1, step = 0.05, group = G_PCR)
+int   pcrLen     = input.int(5, "PCR trend lookback (bars, chart timeframe mode)", minval = 1, group = G_PCR)
+float pcrMinChg  = input.float(0.02, "Min PCR change to call a trend", minval = 0.0, step = 0.01, group = G_PCR)
+int   divLen     = input.int(20, "PCR divergence lookback (bars)", minval = 5, group = G_PCR)
+
+bool   useTrendFilter = input.bool(true, "Require the trend to agree", group = G_SIG)
+bool   useVolFilter   = input.bool(true, "Require high volume", group = G_SIG)
+bool   usePcrFilter   = input.bool(true, "Require PCR to confirm (when available)", group = G_SIG)
+bool   useOiFilter    = input.bool(true, "Require OI to confirm (when available)", group = G_SIG)
+bool   useHtf         = input.bool(false, "Require higher-timeframe 9/20 agreement", group = G_SIG)
+string htfTf          = input.timeframe("15", "Higher timeframe", group = G_SIG)
+float  clearAtr       = input.float(1.0, "Keep clear of a strong level by (x ATR)", minval = 0.0, step = 0.1, group = G_SIG)
+int    cooldown       = input.int(5, "Bars before the same call can repeat", minval = 0, group = G_SIG)
+bool   useStretch     = input.bool(true, "Skip a call on a stretched candle", group = G_SIG, tooltip = "A candle that has already run far from the 9 EMA, or that closed well off its extreme, is a late entry. The call is skipped and shown as a grey label.")
+float  maxExtAtr      = input.float(1.5, "Stretched when the close is past the 9 EMA by (x ATR)", minval = 0.1, step = 0.1, group = G_SIG)
+float  maxWickPct     = input.float(33.0, "Stretched when the wick against the call is over (% of candle)", minval = 1.0, maxval = 100.0, step = 1.0, group = G_SIG)
+
+float slAtrMult = input.float(1.5, "ATR stop when no level is near (x ATR)", minval = 0.1, step = 0.1, group = G_RISK)
+float slBufAtr  = input.float(0.25, "Stop beyond the level by (x ATR)", minval = 0.0, step = 0.05, group = G_RISK)
+float minSlAtr  = input.float(0.75, "Smallest stop (x ATR)", minval = 0.1, step = 0.05, group = G_RISK)
+float maxSlAtr  = input.float(3.0, "Largest stop from a level (x ATR)", minval = 0.5, step = 0.1, group = G_RISK)
+float maxSlPct  = input.float(6.0, "Skip if the stop is over (% of premium, strike chart, 0 = off)", minval = 0.0, step = 0.5, group = G_RISK, tooltip = "Used on a CE or PE strike chart. A call whose stop is wider than this share of the option price is skipped and shown as a grey label.")
+float maxSlPts  = input.float(50.0, "Skip if the stop is over (points, index / futures chart, 0 = off)", minval = 0.0, step = 5.0, group = G_RISK, tooltip = "Used on an index or futures chart. 50 suits NIFTY on 3 minutes. Raise it for BANKNIFTY.")
+float t1RR      = input.float(1.0, "Target 1 (x risk)", minval = 0.1, step = 0.1, group = G_RISK)
+float t2RR      = input.float(2.0, "Target 2 (x risk)", minval = 0.1, step = 0.1, group = G_RISK)
+float minRR     = input.float(2.0, "Minimum reward:risk for a call", minval = 0.1, step = 0.1, group = G_RISK)
+
+bool   showDash   = input.bool(true, "Show dashboard", group = G_SHOW)
+string dashSize   = input.string("Small", "Dashboard text", options = ["Tiny", "Small", "Normal"], group = G_SHOW)
+bool   showLevels = input.bool(true, "Show S1 / S2 / R1 / R2", group = G_SHOW)
+bool   showZones  = input.bool(true, "Shade the level zones", group = G_SHOW)
+bool   showHist   = input.bool(false, "Show past S1 / R1 as dots", group = G_SHOW)
+bool   showCross  = input.bool(true, "Mark 9/20 EMA crosses", group = G_SHOW)
+bool   showDiv    = input.bool(true, "Mark PCR divergence", group = G_SHOW)
+bool   showBg     = input.bool(true, "Tint the background by trend", group = G_SHOW)
+bool   showSkip   = input.bool(true, "Show skipped calls (grey label)", group = G_SHOW)
+
+// =====================================================================
+// CHART TYPE
+// =====================================================================
+string tk         = syminfo.ticker
+bool   autoCE     = str.length(str.match(tk, "[0-9]+C[0-9.]+$")) > 0 or str.length(str.match(tk, "[0-9]+CE$")) > 0
+bool   autoPE     = str.length(str.match(tk, "[0-9]+P[0-9.]+$")) > 0 or str.length(str.match(tk, "[0-9]+PE$")) > 0
+bool   chartIsCE  = chartKindIn == "CE strike" or (chartKindIn == "Auto" and autoCE)
+bool   chartIsPE  = chartKindIn == "PE strike" or (chartKindIn == "Auto" and autoPE and not autoCE)
+bool   chartIsOpt = chartIsCE or chartIsPE
+bool   bothSides  = sideMode == "Both CE and PE"
+int    dirSign    = chartIsPE ? -1 : 1
+bool   oiDaily    = oiMode == "End of day (1D)"
+string oiTf       = oiDaily ? "1D" : timeframe.period
+
+// =====================================================================
+// EMA / ATR / VOLUME
+// =====================================================================
+float emaFast = ta.ema(close, emaFastLen)
+float emaSlow = ta.ema(close, emaSlowLen)
+float atr     = ta.atr(atrLen)
+bool  crossUp = ta.crossover(emaFast, emaSlow)
+bool  crossDn = ta.crossunder(emaFast, emaSlow)
+bool  emaBull = emaFast > emaSlow
+bool  emaBear = emaFast < emaSlow
+bool  slopeUp = emaFast > emaFast[slopeLen] and emaSlow > emaSlow[slopeLen]
+bool  slopeDn = emaFast < emaFast[slopeLen] and emaSlow < emaSlow[slopeLen]
+bool  gapOk   = math.abs(emaFast - emaSlow) > atr * gapAtr
+
+float vol      = nz(volume)
+float volAvg   = ta.sma(vol, volLen)
+bool  volAvail = not na(volume) and volAvg > 0
+bool  volHigh  = volAvail and vol > volAvg * volHighMult
+bool  volLow   = volAvail and vol < volAvg * volLowMult
+float upVol    = math.sum(close > open ? vol : 0.0, volLen)
+float dnVol    = math.sum(close < open ? vol : 0.0, volLen)
+
+float zone = atr * zoneAtr
+float buf  = atr * brkAtr
+
+f_p(float p) =>
+    str.tostring(p, format.mintick)
+
+// Parse KEY=value from the NSE bridge paste line (…|KEY=value|…)
+f_bridgeField(string src, string key) =>
+    string needle = key + "="
+    int    i      = str.pos(src, needle)
+    string out    = ""
+    if not na(i)
+        string rest = str.substring(src, i + str.length(needle), str.length(src))
+        int    pipe = str.pos(rest, "|")
+        out := na(pipe) ? rest : str.substring(rest, 0, pipe)
+    out
+
+f_bridgeNum(string src, string key) =>
+    string raw = f_bridgeField(src, key)
+    raw == "" or str.lower(raw) == "n/a" ? na : str.tonumber(raw)
+
+// =====================================================================
+// OPEN INTEREST (real OI only, never volume)
+// Each request returns [now, previous bar, bar before that] on the OI timeframe.
+// End-of-day mode uses only the finished sessions, so nothing repaints.
+// =====================================================================
+f_reqOi(simple string sym) =>
+    bool   has = useOi and sym != ""
+    string t   = has ? sym + "_OI" : syminfo.tickerid
+    [a, b, c]  = request.security(t, oiTf, [close, close[1], close[2]], lookahead = barmerge.lookahead_on, ignore_invalid_symbol = true)
+    float  ra  = has ? a : na
+    float  rb  = has ? b : na
+    float  rc  = has ? c : na
+    [ra, rb, rc]
+
+f_reqPx(simple string sym) =>
+    bool   has = useOi and sym != ""
+    string t   = has ? sym : syminfo.tickerid
+    [a, b, c]  = request.security(t, oiTf, [close, close[1], close[2]], lookahead = barmerge.lookahead_on, ignore_invalid_symbol = true)
+    float  ra  = has ? a : na
+    float  rb  = has ? b : na
+    float  rc  = has ? c : na
+    [ra, rb, rc]
+
+// 1 Long Buildup, 2 Short Buildup, 3 Short Covering, 4 Long Unwinding, 0 flat, na = no data
+f_state(float pxCur, float pxRef, float oiCur, float oiRef, float minPct) =>
+    float oiPct = not na(oiCur) and oiRef > 0 ? (oiCur - oiRef) / oiRef * 100.0 : na
+    int   st    = na
+    if not na(oiPct) and not na(pxCur) and not na(pxRef)
+        bool oiUp = oiPct >= minPct
+        bool oiDn = oiPct <= -minPct
+        bool pxUp = pxCur > pxRef
+        bool pxDn = pxCur < pxRef
+        st := pxUp and oiUp ? 1 : pxDn and oiUp ? 2 : pxUp and oiDn ? 3 : pxDn and oiDn ? 4 : 0
+    [st, oiPct]
+
+f_isUp(int st) =>
+    st == 1 or st == 3
+
+f_isDn(int st) =>
+    st == 2 or st == 4
+
+f_oiText(int st) =>
+    na(st) ? "Unavailable" : st == 1 ? "Long Buildup" : st == 2 ? "Short Buildup" : st == 3 ? "Short Covering" : st == 4 ? "Long Unwinding" : "Flat"
+
+f_oiDirText(float pct) =>
+    na(pct) ? "Unavailable" : pct >= oiMinPct ? "Increasing " + str.tostring(pct, "#.0") + "%" : pct <= -oiMinPct ? "Decreasing " + str.tostring(pct, "#.0") + "%" : "Flat"
+
+// This chart
+string chartOiTicker = useOi ? ticker.standard(syminfo.tickerid) + "_OI" : syminfo.tickerid
+[chOi0, chOi1, chOi2] = request.security(chartOiTicker, oiTf, [close, close[1], close[2]], lookahead = barmerge.lookahead_on, ignore_invalid_symbol = true)
+[chPx0, chPx1, chPx2] = request.security(syminfo.tickerid, oiTf, [close, close[1], close[2]], lookahead = barmerge.lookahead_on)
+float chOiCur = not useOi ? na : oiDaily ? chOi1 : chOi0
+float chOiRef = not useOi ? na : oiDaily ? chOi2 : chOi0[oiLen]
+float chPxCur = oiDaily ? chPx1 : close
+float chPxRef = oiDaily ? chPx2 : close[oiLen]
+[chSt, chOiPct] = f_state(chPxCur, chPxRef, chOiCur, chOiRef, oiMinPct)
+
+// CE / PE pair 1 (also used for the CE and PE buildup rows)
+[ceO0, ceO1, ceO2] = f_reqOi(ceSym1)
+[ceP0, ceP1, ceP2] = f_reqPx(ceSym1)
+[peO0, peO1, peO2] = f_reqOi(peSym1)
+[peP0, peP1, peP2] = f_reqPx(peSym1)
+bool  ceIsChart = chartIsCE and ceSym1 == ""
+bool  peIsChart = chartIsPE and peSym1 == ""
+float ceOiCur   = ceIsChart ? chOiCur : oiDaily ? ceO1 : ceO0
+float ceOiRef   = ceIsChart ? chOiRef : oiDaily ? ceO2 : ceO0[oiLen]
+float cePxCur   = ceIsChart ? chPxCur : oiDaily ? ceP1 : ceP0
+float cePxRef   = ceIsChart ? chPxRef : oiDaily ? ceP2 : ceP0[oiLen]
+float peOiCur   = peIsChart ? chOiCur : oiDaily ? peO1 : peO0
+float peOiRef   = peIsChart ? chOiRef : oiDaily ? peO2 : peO0[oiLen]
+float pePxCur   = peIsChart ? chPxCur : oiDaily ? peP1 : peP0
+float pePxRef   = peIsChart ? chPxRef : oiDaily ? peP2 : peP0[oiLen]
+[ceSt, ceOiPct] = f_state(cePxCur, cePxRef, ceOiCur, ceOiRef, oiMinPct)
+[peSt, peOiPct] = f_state(pePxCur, pePxRef, peOiCur, peOiRef, oiMinPct)
+
+// Pairs 2 and 3 widen the PCR
+[c2a, c2b, c2c] = f_reqOi(ceSym2)
+[p2a, p2b, p2c] = f_reqOi(peSym2)
+[c3a, c3b, c3c] = f_reqOi(ceSym3)
+[p3a, p3b, p3c] = f_reqOi(peSym3)
+float ce2Cur = oiDaily ? c2b : c2a
+float pe2Cur = oiDaily ? p2b : p2a
+float ce3Cur = oiDaily ? c3b : c3a
+float pe3Cur = oiDaily ? p3b : p3a
+
+// Underlying-sense OI bias: +1 bullish, -1 bearish, 0 flat or mixed, na = no data
+bool ceAvail  = not na(ceSt)
+bool peAvail  = not na(peSt)
+bool futAvail = not chartIsOpt and not na(chSt)
+int  oiScore  = 0
+oiScore += ceAvail ? (f_isUp(ceSt) ? 1 : f_isDn(ceSt) ? -1 : 0) : 0
+oiScore += peAvail ? (f_isUp(peSt) ? -1 : f_isDn(peSt) ? 1 : 0) : 0
+oiScore += futAvail ? (f_isUp(chSt) ? 1 : f_isDn(chSt) ? -1 : 0) : 0
+bool oiAvail = ceAvail or peAvail or futAvail
+int  oiBias  = not oiAvail ? na : oiScore > 0 ? 1 : oiScore < 0 ? -1 : 0
+
+int    mainOiSt  = not na(chSt) ? chSt : not na(ceSt) ? ceSt : peSt
+string mainOiTag = not na(chSt) ? (chartIsCE ? "CE" : chartIsPE ? "PE" : "chart") : not na(ceSt) ? "CE" : not na(peSt) ? "PE" : ""
+bool   ceOiUp    = ceOiPct >= oiMinPct
+bool   peOiUp    = peOiPct >= oiMinPct
+
+// =====================================================================
+// PCR = Put OI / Call OI across the complete CE/PE pairs you set
+// =====================================================================
+f_pcr(float c1, float p1, float c2, float p2, float c3, float p3) =>
+    bool  k1 = c1 > 0 and not na(p1)
+    bool  k2 = c2 > 0 and not na(p2)
+    bool  k3 = c3 > 0 and not na(p3)
+    float sc = (k1 ? c1 : 0.0) + (k2 ? c2 : 0.0) + (k3 ? c3 : 0.0)
+    float sp = (k1 ? p1 : 0.0) + (k2 ? p2 : 0.0) + (k3 ? p3 : 0.0)
+    int   n  = (k1 ? 1 : 0) + (k2 ? 1 : 0) + (k3 ? 1 : 0)
+    float r  = sc > 0 ? sp / sc : na
+    [r, n]
+
+[pcrLive, pcrPairs]      = f_pcr(ceOiCur, peOiCur, ce2Cur, pe2Cur, ce3Cur, pe3Cur)
+[pcrDayRef, pcrRefPairs] = f_pcr(ceOiRef, peOiRef, c2c, p2c, c3c, p3c)
+
+// NSE Bridge paste (Method B) – preferred over typed PCR / TV _OI when present
+string bridgeRaw   = str.replace_all(str.replace_all(bridgePaste, "\n", ""), " ", "")
+bool   bridgeOn    = str.length(bridgeRaw) > 0 and str.pos(bridgeRaw, "PCR=") >= 0
+float  brPcr       = bridgeOn ? f_bridgeNum(bridgeRaw, "PCR") : na
+string brDir       = bridgeOn ? str.lower(f_bridgeField(bridgeRaw, "DIR")) : ""
+float  brCeDoi     = bridgeOn ? f_bridgeNum(bridgeRaw, "CE_dOI") : na
+float  brPeDoi     = bridgeOn ? f_bridgeNum(bridgeRaw, "PE_dOI") : na
+string brFresh     = bridgeOn ? str.lower(f_bridgeField(bridgeRaw, "FRESH")) : ""
+string brUsable    = bridgeOn ? f_bridgeField(bridgeRaw, "USABLE") : ""
+string brTs        = bridgeOn ? f_bridgeField(bridgeRaw, "TS") : ""
+float  brAtm       = bridgeOn ? f_bridgeNum(bridgeRaw, "ATM") : na
+float  brSpot      = bridgeOn ? f_bridgeNum(bridgeRaw, "SPOT") : na
+bool   bridgeUsable = not bridgeOn ? true : brUsable == "1" or str.lower(brUsable) == "true"
+bool   bridgeFresh  = not bridgeOn ? true : brFresh == "fresh"
+bool   bridgeOk     = not bridgeOn or not requireBridgeOk or (bridgeUsable and bridgeFresh)
+int    brPcrTrend   = brDir == "rising" or brDir == "increasing" ? 1 : brDir == "falling" or brDir == "decreasing" ? -1 : brDir == "sideways" or brDir == "flat" ? 0 : na
+// Snapshot Change OI bias in underlying sense: PE buildup supports CE, CE buildup supports PE
+int    brOiBias     = na(brCeDoi) and na(brPeDoi) ? na : nz(brPeDoi) > nz(brCeDoi) and nz(brPeDoi) > 0 ? 1 : nz(brCeDoi) > nz(brPeDoi) and nz(brCeDoi) > 0 ? -1 : 0
+
+bool  pcrIsLive = not na(pcrLive)
+bool  pcrIsBr   = bridgeOn and not na(brPcr)
+float pcr       = pcrIsLive ? pcrLive : pcrIsBr ? brPcr : pcrManual > 0 ? pcrManual : na
+bool  pcrAvail  = not na(pcr)
+float pcrRef    = oiDaily ? pcrDayRef : pcrLive[pcrLen]
+float pcrChg    = pcrIsLive ? pcrLive - pcrRef : na
+int   pcrTrend  = pcrIsBr and not na(brPcrTrend) ? brPcrTrend : na(pcrChg) ? na : pcrChg >= pcrMinChg ? 1 : pcrChg <= -pcrMinChg ? -1 : 0
+int   pcrLevel  = not pcrAvail ? 0 : pcr >= pcrBullThr ? 1 : pcr <= pcrBearThr ? -1 : 0
+int   pcrScore  = nz(pcrTrend) + pcrLevel
+int   pcrBias   = not pcrAvail ? na : pcrScore > 0 ? 1 : pcrScore < 0 ? -1 : 0
+
+// Prefer bridge Change OI over TradingView _OI when the paste line is present
+oiBias := bridgeOn and not na(brOiBias) ? brOiBias : oiBias
+oiAvail := bridgeOn and not na(brOiBias) ? true : oiAvail
+
+// Divergence needs intraday PCR, so it is skipped in end-of-day mode
+float uPx        = chartIsPE ? -close : close
+float uLow       = ta.lowest(uPx, divLen)
+float uHigh      = ta.highest(uPx, divLen)
+float pcrDivChg  = pcrIsLive and not oiDaily ? pcrLive - pcrLive[divLen] : na
+bool  pcrBullDiv = uPx <= uLow and pcrDivChg >= pcrMinChg
+bool  pcrBearDiv = uPx >= uHigh and pcrDivChg <= -pcrMinChg
+
+// =====================================================================
+// TREND (measured on this chart's price)
+// 2 Strong Bullish, 1 Bullish, 0 Sideways, -1 Bearish, -2 Strong Bearish
+// =====================================================================
+int trScore = 0
+int trMax   = 0
+if fEma
+    trMax   += 1
+    trScore += emaBull ? 1 : emaBear ? -1 : 0
+if fSlope
+    trMax   += 1
+    trScore += slopeUp ? 1 : slopeDn ? -1 : 0
+if fPrice
+    trMax   += 1
+    trScore += close > emaFast and close > emaSlow ? 1 : close < emaFast and close < emaSlow ? -1 : 0
+if fVol and volAvail
+    trMax   += 1
+    trScore += upVol > dnVol * volBalMult ? 1 : dnVol > upVol * volBalMult ? -1 : 0
+if fPcr and not na(pcrBias)
+    trMax   += 1
+    trScore += pcrBias * dirSign
+if fOi and not na(oiBias)
+    trMax   += 1
+    trScore += oiBias * dirSign
+
+float trRatio = trMax > 0 ? trScore * 1.0 / trMax : 0.0
+bool  flat    = fEma and not gapOk
+int   trend   = flat ? 0 : trRatio >= strongThr ? 2 : trRatio >= trendThr ? 1 : trRatio <= -strongThr ? -2 : trRatio <= -trendThr ? -1 : 0
+
+[htfFast, htfSlow] = request.security(syminfo.tickerid, htfTf, [ta.ema(close, emaFastLen)[1], ta.ema(close, emaSlowLen)[1]], lookahead = barmerge.lookahead_on)
+
+// =====================================================================
+// SUPPORT / RESISTANCE from volume pivots, swings and rejections
+// A level under price is support, a level over price is resistance.
+// =====================================================================
+type Level
+    float price
+    int   born
+    int   touches
+    int   pivots
+    float volRatio
+    bool  oiBuild
+    int   lastTouch
+
+var array<Level> levels = array.new<Level>()
+
+f_addLevel(float p, float vr, bool ob) =>
+    bool  merged = false
+    float tol    = atr * mergeAtr
+    int   n      = array.size(levels)
+    if n > 0
+        for i = 0 to n - 1
+            Level L = array.get(levels, i)
+            if not merged and math.abs(L.price - p) <= tol
+                L.price     := (L.price * L.pivots + p) / (L.pivots + 1)
+                L.pivots    := L.pivots + 1
+                L.touches   := L.touches + 1
+                L.volRatio  := math.max(L.volRatio, vr)
+                L.oiBuild   := L.oiBuild or ob
+                L.lastTouch := bar_index
+                merged      := true
+    if not merged
+        array.push(levels, Level.new(p, bar_index - pivRight, 1, 1, vr, ob, bar_index))
+    merged
+
+// 2 = strong, 1 = moderate
+f_strength(Level L) =>
+    int sc = 0
+    sc += L.volRatio >= volHighMult ? 1 : 0
+    sc += L.touches >= strongTouches ? 1 : 0
+    sc += L.touches >= strongTouches * 2 ? 1 : 0
+    sc += L.oiBuild ? 1 : 0
+    sc >= 2 ? 2 : 1
+
+float ph          = ta.pivothigh(high, pivLeft, pivRight)
+float pl          = ta.pivotlow(low, pivLeft, pivRight)
+float pivVol      = math.max(vol[pivRight], vol[pivRight + 1], vol[pivRight - 1])
+float pivVolBase  = volAvg[pivRight]
+float pivVolRatio = pivVolBase > 0 ? pivVol / pivVolBase : 0.0
+bool  pivOiBuild  = not oiDaily and chOiPct[pivRight] >= oiMinPct
+
+if not na(ph) and not na(atr)
+    f_addLevel(ph, pivVolRatio, pivOiBuild)
+if not na(pl) and not na(atr)
+    f_addLevel(pl, pivVolRatio, pivOiBuild)
+
+while array.size(levels) > maxLevels
+    array.shift(levels)
+
+if array.size(levels) > 0
+    for i = array.size(levels) - 1 to 0
+        Level oldL = array.get(levels, i)
+        if bar_index - oldL.born > levelAge
+            array.remove(levels, i)
+
+float s1 = na
+float s2 = na
+float r1 = na
+float r2 = na
+int   s1Str  = 0
+int   s2Str  = 0
+int   r1Str  = 0
+int   r2Str  = 0
+int   s1Born = na
+int   s2Born = na
+int   r1Born = na
+int   r2Born = na
+float nearStrongSup = na
+float nearStrongRes = na
+bool  brkUp        = false
+bool  brkDn        = false
+bool  bounce       = false
+bool  reject       = false
+bool  brkUpStrong  = false
+bool  brkDnStrong  = false
+bool  bounceStrong = false
+bool  rejectStrong = false
+
+if array.size(levels) > 0 and not na(zone)
+    for i = 0 to array.size(levels) - 1
+        Level L = array.get(levels, i)
+        bool holdUp = low <= L.price + zone and close > L.price + zone and open > L.price - zone
+        bool holdDn = high >= L.price - zone and close < L.price - zone and open < L.price + zone
+        if (holdUp or holdDn) and bar_index - L.lastTouch >= touchGap
+            L.touches   := L.touches + 1
+            L.lastTouch := bar_index
+        int  st     = f_strength(L)
+        bool strong = st == 2
+        if close > L.price + buf and close[1] <= L.price + buf
+            brkUp       := true
+            brkUpStrong := brkUpStrong or strong
+        if close < L.price - buf and close[1] >= L.price - buf
+            brkDn       := true
+            brkDnStrong := brkDnStrong or strong
+        if holdUp and close > open
+            bounce       := true
+            bounceStrong := bounceStrong or strong
+        if holdDn and close < open
+            reject       := true
+            rejectStrong := rejectStrong or strong
+        if L.price <= close
+            if na(s1) or L.price > s1
+                s2     := s1
+                s2Str  := s1Str
+                s2Born := s1Born
+                s1     := L.price
+                s1Str  := st
+                s1Born := L.born
+            else if na(s2) or L.price > s2
+                s2     := L.price
+                s2Str  := st
+                s2Born := L.born
+            if strong and (na(nearStrongSup) or L.price > nearStrongSup)
+                nearStrongSup := L.price
+        else
+            if na(r1) or L.price < r1
+                r2     := r1
+                r2Str  := r1Str
+                r2Born := r1Born
+                r1     := L.price
+                r1Str  := st
+                r1Born := L.born
+            else if na(r2) or L.price < r2
+                r2     := L.price
+                r2Str  := st
+                r2Born := L.born
+            if strong and (na(nearStrongRes) or L.price < nearStrongRes)
+                nearStrongRes := L.price
+
+// =====================================================================
+// CALL LOGIC (confirmed candle only)
+// =====================================================================
+bool  volOk     = not useVolFilter or not volAvail or volHigh
+bool  trendUpOk = not useTrendFilter or trend >= 1
+bool  trendDnOk = not useTrendFilter or trend <= -1
+bool  htfUpOk   = not useHtf or htfFast > htfSlow
+bool  htfDnOk   = not useHtf or htfFast < htfSlow
+bool  clearUp   = na(nearStrongRes) or nearStrongRes - close >= atr * clearAtr
+bool  clearDn   = na(nearStrongSup) or close - nearStrongSup >= atr * clearAtr
+
+float upStruct  = na(s1) ? na : close - (s1 - atr * slBufAtr)
+float dnStruct  = na(r1) ? na : (r1 + atr * slBufAtr) - close
+float upRisk    = (na(upStruct) or upStruct > atr * maxSlAtr) ? atr * slAtrMult : math.max(upStruct, atr * minSlAtr)
+float dnRisk    = (na(dnStruct) or dnStruct > atr * maxSlAtr) ? atr * slAtrMult : math.max(dnStruct, atr * minSlAtr)
+bool  rrOkUp    = na(nearStrongRes) or (nearStrongRes - close) / upRisk >= minRR
+bool  rrOkDn    = na(nearStrongSup) or (close - nearStrongSup) / dnRisk >= minRR
+float t2Mult    = math.max(t2RR, minRR)
+
+bool upCore  = emaBull and slopeUp and gapOk
+bool dnCore  = emaBear and slopeDn and gapOk
+bool upBase  = upCore and (brkUp or bounce) and volOk and trendUpOk and htfUpOk and clearUp and rrOkUp
+bool dnBase  = dnCore and (brkDn or reject) and volOk and trendDnOk and htfDnOk and clearDn and rrOkDn
+
+// Stretched candle: the move is already spent, so the call would be a late entry
+float barRange  = high - low
+float upWickPct = barRange > 0 ? (high - math.max(open, close)) / barRange * 100.0 : 0.0
+float dnWickPct = barRange > 0 ? (math.min(open, close) - low) / barRange * 100.0 : 0.0
+bool  extUp     = close - emaFast > atr * maxExtAtr
+bool  extDn     = emaFast - close > atr * maxExtAtr
+bool  stretchUp = useStretch and (extUp or upWickPct > maxWickPct)
+bool  stretchDn = useStretch and (extDn or dnWickPct > maxWickPct)
+
+// Stop too wide: the candle that sets the stop is too big to trade
+float slCap  = chartIsOpt ? (maxSlPct > 0 ? close * maxSlPct / 100.0 : na) : (maxSlPts > 0 ? maxSlPts : na)
+bool  wideUp = not na(slCap) and upRisk > slCap
+bool  wideDn = not na(slCap) and dnRisk > slCap
+
+bool upSetup   = upBase and not stretchUp and not wideUp
+bool dnSetup   = dnBase and not stretchDn and not wideDn
+bool upSkipRaw = upBase and (stretchUp or wideUp)
+bool dnSkipRaw = dnBase and (stretchDn or wideDn)
+
+// Map this chart's direction to the option to buy
+bool ceSetup = chartIsPE ? (dnSetup and bothSides) : upSetup
+bool peSetup = chartIsPE ? upSetup : chartIsCE ? (dnSetup and bothSides) : dnSetup
+bool ceSkipSetup = chartIsPE ? (dnSkipRaw and bothSides) : upSkipRaw
+bool peSkipSetup = chartIsPE ? upSkipRaw : chartIsCE ? (dnSkipRaw and bothSides) : dnSkipRaw
+
+bool pcrBullOk = not usePcrFilter or na(pcrBias) or pcrBias == 1
+bool pcrBearOk = not usePcrFilter or na(pcrBias) or pcrBias == -1
+bool oiBullOk  = not useOiFilter or na(oiBias) or oiBias == 1
+bool oiBearOk  = not useOiFilter or na(oiBias) or oiBias == -1
+
+var int lastCeBar = na
+var int lastPeBar = na
+bool ceCool = na(lastCeBar) or bar_index - lastCeBar > cooldown
+bool peCool = na(lastPeBar) or bar_index - lastPeBar > cooldown
+
+bool buyCE = barstate.isconfirmed and ceSetup and pcrBullOk and oiBullOk and ceCool and bridgeOk
+bool buyPE = barstate.isconfirmed and peSetup and pcrBearOk and oiBearOk and peCool and bridgeOk
+int  sig   = buyCE ? 1 : buyPE ? -1 : 0
+
+// A call that passed every filter except the stretch / width check
+bool skipCE = barstate.isconfirmed and ceSkipSetup and pcrBullOk and oiBullOk and ceCool and bridgeOk
+bool skipPE = barstate.isconfirmed and peSkipSetup and pcrBearOk and oiBearOk and peCool and bridgeOk
+if showSkip and (skipCE or skipPE)
+    bool   skUp  = (skipCE and not chartIsPE) or (skipPE and chartIsPE)
+    bool   skWide = skUp ? wideUp : wideDn
+    float  skRisk = skUp ? upRisk : dnRisk
+    string skWhy  = skWide ? "stop too wide (" + f_p(skRisk) + " pts)" : (skUp ? extUp : extDn) ? "far from 9 EMA" : "long wick"
+    label.new(bar_index, skUp ? low : high, (skipCE ? "Skip CE" : "Skip PE") + "\n" + skWhy, yloc = skUp ? yloc.belowbar : yloc.abovebar, style = skUp ? label.style_label_up : label.style_label_down, color = color.gray, textcolor = color.white, size = size.small)
+
+// Direction of the call on this chart's price
+bool  sigUp   = (buyCE and not chartIsPE) or (buyPE and chartIsPE)
+float sigRisk = sigUp ? upRisk : dnRisk
+float sigSL   = sigUp ? close - sigRisk : close + sigRisk
+float sigT1   = sigUp ? close + sigRisk * t1RR : math.max(close - sigRisk * t1RR, syminfo.mintick)
+float sigT2   = sigUp ? close + sigRisk * t2Mult : math.max(close - sigRisk * t2Mult, syminfo.mintick)
+
+// Why the last closed candle is a WAIT
+string reason = "All filters agree"
+if sig == 0
+    if bridgeOn and not bridgeOk
+        reason := brFresh == "stale" ? "NSE bridge stale – refresh paste" : "NSE bridge not usable – refresh paste"
+    else if not gapOk or (useTrendFilter and trend == 0)
+        reason := "Sideways or mixed trend"
+    else if not upCore and not dnCore
+        reason := "9/20 EMA and slope disagree"
+    else
+        bool up      = upCore
+        bool trOk    = up ? trendUpOk : trendDnOk
+        bool trig    = up ? (brkUp or bounce) : (brkDn or reject)
+        bool htfOk   = up ? htfUpOk : htfDnOk
+        bool clr     = up ? clearUp : clearDn
+        bool rrOk    = up ? rrOkUp : rrOkDn
+        bool strOk   = up ? not stretchUp : not stretchDn
+        bool wideOk  = up ? not wideUp : not wideDn
+        bool wantCE  = (up and not chartIsPE) or (not up and chartIsPE)
+        bool sideOk  = wantCE ? (not chartIsPE or bothSides) : (not chartIsCE or bothSides)
+        bool pcrOk   = wantCE ? pcrBullOk : pcrBearOk
+        bool oiOk    = wantCE ? oiBullOk : oiBearOk
+        bool coolOk  = wantCE ? ceCool : peCool
+        reason := not trOk ? "Trend filter does not agree" : not trig ? "No breakout or level confirmation" : not volOk ? "Volume below average" : not htfOk ? "Higher timeframe disagrees" : not clr ? "Strong level too close" : not rrOk ? "Reward:risk under minimum" : not wideOk ? "Stop too wide for this candle" : not strOk ? "Stretched candle, wait for a pullback" : not sideOk ? "Other side is off on this strike chart" : not pcrOk ? "PCR does not confirm" : not oiOk ? "OI does not confirm" : not coolOk ? "Same call fired recently" : "Waiting for candle close"
+
+int    shownSig    = barstate.isconfirmed ? sig : sig[1]
+string shownReason = barstate.isconfirmed ? reason : reason[1]
+
+var string lastCall = "None yet"
+
+if buyCE or buyPE
+    string side    = buyCE ? "BUY CE" : "BUY PE"
+    string slTxt   = f_p(sigSL) + " (" + f_p(sigRisk) + " pts)"
+    string lvlTxt  = "Entry ~" + f_p(close) + "\nSL " + slTxt + "\nT1 " + f_p(sigT1) + "  T2 " + f_p(sigT2) + "\nRR 1:" + str.tostring(t2Mult, "#.#")
+    string mirror  = (chartIsOpt and not sigUp) ? "\n(levels are this chart's price)" : ""
+    label.new(bar_index, sigUp ? low : high, side + "\n" + lvlTxt + mirror, yloc = sigUp ? yloc.belowbar : yloc.abovebar, style = sigUp ? label.style_label_up : label.style_label_down, color = buyCE ? color.green : color.red, textcolor = color.white, size = size.small)
+    alert(syminfo.ticker + " v4 Options Assistant | " + side + " | Entry ~" + f_p(close) + " | SL " + slTxt + " | T1 " + f_p(sigT1) + " | T2 " + f_p(sigT2) + " | RR 1:" + str.tostring(t2Mult, "#.#"), alert.freq_once_per_bar_close)
+    lastCall := side + " " + str.format_time(time, "dd MMM HH:mm", syminfo.timezone) + "\nSL " + f_p(sigSL) + "  T1 " + f_p(sigT1) + "  T2 " + f_p(sigT2)
+    if buyCE
+        lastCeBar := bar_index
+    else
+        lastPeBar := bar_index
+
+// =====================================================================
+// PLOTS
+// =====================================================================
+plot(emaFast, title = "EMA 9", color = color.orange, linewidth = 2)
+plot(emaSlow, title = "EMA 20", color = color.blue, linewidth = 2)
+plot(showHist ? s1 : na, title = "S1 history", color = color.new(color.green, 30), style = plot.style_circles, linewidth = 1)
+plot(showHist ? r1 : na, title = "R1 history", color = color.new(color.red, 30), style = plot.style_circles, linewidth = 1)
+
+plotshape(showCross and crossUp, title = "9 crosses above 20", style = shape.triangleup, location = location.belowbar, color = color.new(color.green, 20), size = size.tiny)
+plotshape(showCross and crossDn, title = "9 crosses below 20", style = shape.triangledown, location = location.abovebar, color = color.new(color.red, 20), size = size.tiny)
+plotshape(showDiv and pcrBullDiv and not pcrBullDiv[1], title = "PCR bullish divergence", style = shape.diamond, location = location.belowbar, color = color.new(color.aqua, 0), size = size.tiny)
+plotshape(showDiv and pcrBearDiv and not pcrBearDiv[1], title = "PCR bearish divergence", style = shape.diamond, location = location.abovebar, color = color.new(color.fuchsia, 0), size = size.tiny)
+
+color bgCol = not showBg ? na : trend == 2 ? color.new(color.green, 86) : trend == 1 ? color.new(color.green, 93) : trend == -2 ? color.new(color.red, 86) : trend == -1 ? color.new(color.red, 93) : na
+bgcolor(bgCol, title = "Trend tint")
+
+// S1 / S2 / R1 / R2: four lines only, redrawn on the last bar
+var array<line>  srLines  = array.new<line>()
+var array<label> srLabels = array.new<label>()
+var array<box>   srBoxes  = array.new<box>()
+
+f_drawLevel(float p, int st, int born, string name, color c) =>
+    if not na(p)
+        int    x1   = math.max(nz(born, bar_index), bar_index - 300)
+        string kind = st == 2 ? "Strong" : "Moderate"
+        array.push(srLines, line.new(x1, p, bar_index, p, extend = extend.right, color = c, width = st == 2 ? 2 : 1, style = st == 2 ? line.style_solid : line.style_dashed))
+        array.push(srLabels, label.new(bar_index + 6, p, name + " " + kind + " " + f_p(p), style = label.style_label_left, color = color.new(c, 100), textcolor = c, size = size.small))
+        if showZones
+            array.push(srBoxes, box.new(x1, p + zone, bar_index, p - zone, extend = extend.right, border_color = color.new(c, 100), bgcolor = color.new(c, 88)))
+    true
+
+if barstate.islast
+    while array.size(srLines) > 0
+        line.delete(array.pop(srLines))
+    while array.size(srLabels) > 0
+        label.delete(array.pop(srLabels))
+    while array.size(srBoxes) > 0
+        box.delete(array.pop(srBoxes))
+    if showLevels
+        f_drawLevel(s1, s1Str, s1Born, "S1", color.green)
+        f_drawLevel(s2, s2Str, s2Born, "S2", color.teal)
+        f_drawLevel(r1, r1Str, r1Born, "R1", color.red)
+        f_drawLevel(r2, r2Str, r2Born, "R2", color.maroon)
+
+// =====================================================================
+// DASHBOARD (top right)
+// =====================================================================
+color C_BULL = color.lime
+color C_BEAR = color.red
+color C_WARN = color.yellow
+color C_NA   = color.gray
+color C_TXT  = color.white
+
+string dashTxt = dashSize == "Tiny" ? size.tiny : dashSize == "Small" ? size.small : size.normal
+var table dash = table.new(position.top_right, 2, 17, bgcolor = color.new(color.black, 15), frame_color = color.new(color.gray, 40), frame_width = 1, border_color = color.new(color.gray, 70), border_width = 1)
+
+f_row(int r, string k, string v, color c) =>
+    table.cell(dash, 0, r, k, text_color = C_TXT, text_halign = text.align_left, text_size = dashTxt)
+    table.cell(dash, 1, r, v, text_color = c, text_halign = text.align_left, text_size = dashTxt)
+
+f_lvl(float p, int st) =>
+    na(p) ? "-" : f_p(p) + (st == 2 ? " Strong" : " Moderate")
+
+if barstate.islast and showDash
+    bool   is3m     = timeframe.isminutes and timeframe.multiplier == 3
+    string kindTxt  = chartIsCE ? "CE strike" : chartIsPE ? "PE strike" : "Index / Futures"
+    string tfTxt    = is3m ? "3m" : timeframe.period + " (built for 3m)"
+    string eodTag   = oiDaily ? " (prev day)" : ""
+
+    string trendTxt = trend == 2 ? "Strong Bullish" : trend == 1 ? "Bullish" : trend == -1 ? "Bearish" : trend == -2 ? "Strong Bearish" : "Sideways"
+    string trendSfx = chartIsCE ? " (CE premium)" : chartIsPE ? " (PE premium)" : ""
+    color  trendCol = trend > 0 ? C_BULL : trend < 0 ? C_BEAR : C_WARN
+
+    string pcrSrc   = pcrIsLive ? " (" + str.tostring(pcrPairs) + " pair" + (pcrPairs > 1 ? "s" : "") + ")" + eodTag : pcrIsBr ? " (bridge)" : pcrManual > 0 ? " (typed)" : ""
+    string pcrTxt   = not pcrAvail ? "Unavailable" : str.tostring(pcr, "#.00") + pcrSrc
+    color  pcrCol   = not pcrAvail ? C_NA : pcr >= pcrBullThr ? C_BULL : pcr <= pcrBearThr ? C_BEAR : C_WARN
+    string pcrTrTxt = na(pcrTrend) ? "Unavailable" : (pcrTrend == 1 ? "Increasing" : pcrTrend == -1 ? "Decreasing" : "Flat") + (pcrIsBr ? " (bridge)" : "") + (pcrBullDiv ? " | Bullish divergence" : pcrBearDiv ? " | Bearish divergence" : "") + (pcrIsLive ? eodTag : "")
+    color  pcrTrCol = na(pcrTrend) ? C_NA : pcrTrend == 1 ? C_BULL : pcrTrend == -1 ? C_BEAR : C_WARN
+
+    string volTxt   = not volAvail ? "Unavailable" : (volHigh ? "High" : volLow ? "Low" : "Normal") + " (" + str.tostring(vol / volAvg, "#.0") + "x)"
+    color  volCol   = not volAvail ? C_NA : volHigh ? (close >= open ? C_BULL : C_BEAR) : volLow ? C_WARN : C_TXT
+
+    bool   mainUp   = f_isUp(mainOiSt)
+    bool   mainDn   = f_isDn(mainOiSt)
+    bool   mainIsPE = mainOiTag == "PE"
+    string oiTxt    = bridgeOn and not na(brOiBias) ? (brOiBias == 1 ? "PE Δ > CE Δ (CE bias)" : brOiBias == -1 ? "CE Δ > PE Δ (PE bias)" : "Change OI flat") + " (bridge)" : na(mainOiSt) ? "Unavailable" : f_oiText(mainOiSt) + " (" + mainOiTag + ")" + eodTag
+    color  oiCol    = bridgeOn and not na(brOiBias) ? (brOiBias > 0 ? C_BULL : brOiBias < 0 ? C_BEAR : C_WARN) : na(mainOiSt) ? C_NA : mainUp ? (mainIsPE ? C_BEAR : C_BULL) : mainDn ? (mainIsPE ? C_BULL : C_BEAR) : C_WARN
+
+    string ceTxt    = bridgeOn ? (na(brCeDoi) ? "n/a (bridge)" : "Δ " + (brCeDoi > 0 ? "+" : "") + str.tostring(brCeDoi, "#") + " (bridge)") : na(ceOiPct) ? "Unavailable" : f_oiDirText(ceOiPct) + (na(ceSt) or ceSt == 0 ? "" : " | CE " + f_oiText(ceSt))
+    color  ceCol    = bridgeOn ? (na(brCeDoi) ? C_NA : brCeDoi > 0 ? C_BEAR : brCeDoi < 0 ? C_BULL : C_TXT) : na(ceOiPct) ? C_NA : f_isUp(ceSt) ? C_BULL : f_isDn(ceSt) ? C_BEAR : C_TXT
+    string peTxt    = bridgeOn ? (na(brPeDoi) ? "n/a (bridge)" : "Δ " + (brPeDoi > 0 ? "+" : "") + str.tostring(brPeDoi, "#") + " (bridge)") : na(peOiPct) ? "Unavailable" : f_oiDirText(peOiPct) + (na(peSt) or peSt == 0 ? "" : " | PE " + f_oiText(peSt))
+    color  peCol    = bridgeOn ? (na(brPeDoi) ? C_NA : brPeDoi > 0 ? C_BULL : brPeDoi < 0 ? C_BEAR : C_TXT) : na(peOiPct) ? C_NA : f_isUp(peSt) ? C_BEAR : f_isDn(peSt) ? C_BULL : C_TXT
+
+    string brTxt    = not bridgeOn ? "Empty – paste NSE bridge line" : (bridgeOk ? "OK" : "BLOCKED") + " | " + (brFresh == "" ? "?" : brFresh) + " | USABLE=" + (brUsable == "" ? "?" : brUsable) + (na(brAtm) ? "" : " | ATM " + str.tostring(brAtm, "#")) + (brTs == "" ? "" : " | " + brTs)
+    color  brCol    = not bridgeOn ? C_NA : bridgeOk ? C_BULL : C_WARN
+
+    int    absTrend = math.abs(trend)
+    string strTxt   = absTrend == 2 ? "Strong" : absTrend == 1 ? "Moderate" : "Weak"
+    color  strCol   = absTrend == 2 ? trendCol : absTrend == 1 ? C_TXT : C_WARN
+
+    string sigTxt   = shownSig == 1 ? "BUY CE" : shownSig == -1 ? "BUY PE" : "WAIT"
+    color  sigBg    = shownSig == 1 ? color.green : shownSig == -1 ? color.red : color.yellow
+    color  sigFg    = shownSig == 0 ? color.black : color.white
+
+    f_row(0, "Chart", kindTxt + " | " + tfTxt, is3m ? C_TXT : C_WARN)
+    f_row(1, "NSE Bridge", brTxt, brCol)
+    f_row(2, "Overall Trend", trendTxt + trendSfx, trendCol)
+    f_row(3, "9 EMA", f_p(emaFast), emaBull ? C_BULL : emaBear ? C_BEAR : C_WARN)
+    f_row(4, "20 EMA", f_p(emaSlow), emaBull ? C_BULL : emaBear ? C_BEAR : C_WARN)
+    f_row(5, "PCR", pcrTxt, pcrCol)
+    f_row(6, "PCR Trend", pcrTrTxt, pcrTrCol)
+    f_row(7, "Volume", volTxt, volCol)
+    f_row(8, "OI Trend", oiTxt, oiCol)
+    f_row(9, "CE OI", ceTxt, ceCol)
+    f_row(10, "PE OI", peTxt, peCol)
+    f_row(11, "Support", "S1 " + f_lvl(s1, s1Str) + "\nS2 " + f_lvl(s2, s2Str), C_BULL)
+    f_row(12, "Resistance", "R1 " + f_lvl(r1, r1Str) + "\nR2 " + f_lvl(r2, r2Str), C_BEAR)
+    f_row(13, "Market Strength", strTxt, strCol)
+    table.cell(dash, 0, 14, "Final Signal", text_color = C_TXT, text_halign = text.align_left, text_size = dashTxt)
+    table.cell(dash, 1, 14, sigTxt, text_color = sigFg, bgcolor = sigBg, text_halign = text.align_center, text_size = size.large)
+    f_row(15, "Why", shownReason, shownSig == 0 ? C_WARN : C_TXT)
+    f_row(16, "Last call", lastCall, C_TXT)
+
+// =====================================================================
+// ALERTS (each fires once, on the candle that closes with the event)
+// Create the alert with "Once Per Bar Close".
+// =====================================================================
+bool volConf   = not volAvail or volHigh
+bool isShCover = mainOiSt == 3
+bool isShBuild = mainOiSt == 2
+
+alertcondition(buyCE, title = "BUY CE", message = "v4 Options Assistant: BUY CE on candle close")
+alertcondition(buyPE, title = "BUY PE", message = "v4 Options Assistant: BUY PE on candle close")
+alertcondition(barstate.isconfirmed and trend == 2 and trend[1] != 2, title = "Strong Bullish Trend", message = "v4 Options Assistant: trend turned Strong Bullish")
+alertcondition(barstate.isconfirmed and trend == -2 and trend[1] != -2, title = "Strong Bearish Trend", message = "v4 Options Assistant: trend turned Strong Bearish")
+alertcondition(barstate.isconfirmed and isShCover and not isShCover[1], title = "Short Covering", message = "v4 Options Assistant: Short Covering started")
+alertcondition(barstate.isconfirmed and isShBuild and not isShBuild[1], title = "Short Buildup", message = "v4 Options Assistant: Short Buildup started")
+alertcondition(barstate.isconfirmed and ceOiUp and not ceOiUp[1], title = "CE OI Buildup", message = "v4 Options Assistant: CE OI Buildup started")
+alertcondition(barstate.isconfirmed and peOiUp and not peOiUp[1], title = "PE OI Buildup", message = "v4 Options Assistant: PE OI Buildup started")
+alertcondition(barstate.isconfirmed and bounceStrong and not bounceStrong[1], title = "Strong Support Breakout (bounce up from strong support)", message = "v4 Options Assistant: price bounced up from strong support")
+alertcondition(barstate.isconfirmed and brkUpStrong and volConf, title = "Strong Resistance Breakout", message = "v4 Options Assistant: close above strong resistance with volume")
+alertcondition(barstate.isconfirmed and brkDnStrong and volConf, title = "Strong Support Breakdown", message = "v4 Options Assistant: close below strong support with volume")
+alertcondition(barstate.isconfirmed and rejectStrong and not rejectStrong[1], title = "Strong Resistance Rejection", message = "v4 Options Assistant: price rejected at strong resistance")

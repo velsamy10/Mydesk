@@ -1,0 +1,2 @@
+# NIFTY Monitor — stdlib only (urllib, json, http.server).
+# Kept for Vercel Python runtime detection.

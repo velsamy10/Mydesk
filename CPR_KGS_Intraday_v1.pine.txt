@@ -1,0 +1,166 @@
+//@version=6
+// LATEST | v1 CPR by KGS style | INTRADAY ONLY | no carryforward
+// Published CPR-by-KGS structure (not the closed-source botsbykgs script).
+// Pivot=(H+L+C)/3, BC=(H+L)/2, TC=(Pivot-BC)+Pivot from previous day.
+// CPR Top/Bot = max/min(TC,BC). Above Top=bullish | Below Bot=bearish | Inside=WAIT
+// BUY CE: close breaks above CPR Top | BUY PE: close breaks below CPR Bot
+// Volume pane below chart. No dashboard popup. Square off same day.
+indicator("v1 | CPR KGS Intraday", shorttitle = "v1 CPR KGS", overlay = false, max_labels_count = 300, max_lines_count = 50, explicit_plot_zorder = true)
+
+string G_CPR  = "CPR"
+string G_SIG  = "Signals"
+string G_DAY  = "Intraday (no carryforward)"
+string G_VOL  = "Volume"
+string G_SHOW = "Display"
+
+float narrowPct  = input.float(0.35, "Narrow CPR if width under (% of price)", minval = 0.05, step = 0.05, group = G_CPR)
+float widePct    = input.float(0.75, "Wide CPR if width over (% of price)", minval = 0.1, step = 0.05, group = G_CPR)
+bool  showR1R2   = input.bool(true, "Show R1/R2 S1/S2", group = G_CPR)
+bool  showR3S3   = input.bool(false, "Show R3/S3", group = G_CPR)
+bool  showPdhPdl = input.bool(true, "Show previous day high / low", group = G_CPR)
+
+string entryMode    = input.string("Break CPR Top / Bot", "Entry mode", options = ["Break CPR Top / Bot", "Break Pivot", "Leave CPR zone"], group = G_SIG)
+bool   onlyNarrow   = input.bool(false, "Only signal on Narrow CPR days", group = G_SIG)
+bool   onePerDay    = input.bool(true, "Max one CE and one PE call per day", group = G_SIG)
+bool   confirmClose = input.bool(true, "Signal only on candle close", group = G_SIG)
+
+bool   useSession = input.bool(true, "Enforce intraday session", group = G_DAY)
+string entrySess = input.session("0915-1445", "New entries only (IST)", group = G_DAY)
+string sqOffSess = input.session("1515-1516", "Square-off alert (IST)", group = G_DAY)
+bool   showSqOff = input.bool(true, "Mark EXIT ALL at square-off", group = G_DAY)
+
+bool   useVolFilter = input.bool(true, "Require high volume for signals", group = G_VOL)
+int    volLen       = input.int(20, "Volume MA length", minval = 1, group = G_VOL)
+float  volMult      = input.float(1.2, "High volume (x average)", minval = 0.5, step = 0.1, group = G_VOL)
+
+bool   showZones = input.bool(true, "Shade CPR zone on chart", group = G_SHOW)
+bool   tintBias  = input.bool(true, "Tint chart by CPR bias", group = G_SHOW)
+bool   showText  = input.bool(true, "Show BUY CE / BUY PE text on chart", group = G_SHOW)
+
+// ----- Previous day OHLC (fixed for the session, non-repainting) -----
+[ph, pl, pc] = request.security(syminfo.tickerid, "D", [high[1], low[1], close[1]], lookahead = barmerge.lookahead_on)
+[pdh, pdl]   = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead = barmerge.lookahead_on)
+[ph2, pl2, pc2] = request.security(syminfo.tickerid, "D", [high[2], low[2], close[2]], lookahead = barmerge.lookahead_on)
+
+float pivot = (ph + pl + pc) / 3.0
+float bcRaw = (ph + pl) / 2.0
+float tcRaw = (pivot - bcRaw) + pivot
+// Always plot Top above Bot (TC/BC can invert when close is far from mid)
+float cprTop = math.max(tcRaw, bcRaw)
+float cprBot = math.min(tcRaw, bcRaw)
+
+float rangeHL = ph - pl
+float r1 = 2.0 * pivot - pl
+float s1 = 2.0 * pivot - ph
+float r2 = pivot + rangeHL
+float s2 = pivot - rangeHL
+float r3 = ph + 2.0 * (pivot - pl)
+float s3 = pl - 2.0 * (ph - pivot)
+
+float cprWidth = cprTop - cprBot
+float cprPct   = close > 0 ? cprWidth / close * 100.0 : na
+bool  isNarrow = not na(cprPct) and cprPct <= narrowPct
+bool  isWide   = not na(cprPct) and cprPct >= widePct
+string cprType = isNarrow ? "Narrow" : isWide ? "Wide" : "Normal"
+
+float pivotPrev = (ph2 + pl2 + pc2) / 3.0
+string cprSlope = na(pivot) or na(pivotPrev) ? "-" : pivot > pivotPrev ? "Ascending" : pivot < pivotPrev ? "Descending" : "Flat"
+
+bool aboveCpr  = not na(cprTop) and close > cprTop
+bool belowCpr  = not na(cprBot) and close < cprBot
+bool insideCpr = not na(cprTop) and not na(cprBot) and close <= cprTop and close >= cprBot
+
+float vol     = nz(volume)
+float volAvg  = ta.sma(vol, volLen)
+bool  volHigh = volAvg > 0 and vol > volAvg * volMult
+bool  volOk   = not useVolFilter or volHigh
+
+bool canEnter = not useSession or not na(time(timeframe.period, entrySess, "Asia/Kolkata"))
+bool atSqOff  = not na(time(timeframe.period, sqOffSess, "Asia/Kolkata"))
+bool dayOk    = not onlyNarrow or isNarrow
+
+// Break = first close beyond the level (confirmed)
+bool crossTopUp = not na(cprTop) and close > cprTop and close[1] <= cprTop
+bool crossBotDn = not na(cprBot) and close < cprBot and close[1] >= cprBot
+bool crossPivUp = not na(pivot) and close > pivot and close[1] <= pivot
+bool crossPivDn = not na(pivot) and close < pivot and close[1] >= pivot
+bool leaveUp    = insideCpr[1] and aboveCpr
+bool leaveDn    = insideCpr[1] and belowCpr
+
+bool longSetup  = false
+bool shortSetup = false
+if entryMode == "Break CPR Top / Bot"
+    longSetup  := crossTopUp
+    shortSetup := crossBotDn
+else if entryMode == "Break Pivot"
+    longSetup  := crossPivUp
+    shortSetup := crossPivDn
+else
+    longSetup  := leaveUp
+    shortSetup := leaveDn
+
+int dayId = year(time, "Asia/Kolkata") * 10000 + month(time, "Asia/Kolkata") * 100 + dayofmonth(time, "Asia/Kolkata")
+var int lastCeDay = na
+var int lastPeDay = na
+bool ceCool = not onePerDay or na(lastCeDay) or lastCeDay != dayId
+bool peCool = not onePerDay or na(lastPeDay) or lastPeDay != dayId
+
+bool closedOk = not confirmClose or barstate.isconfirmed
+bool buyCE = longSetup and canEnter and dayOk and volOk and ceCool and closedOk and not na(cprTop)
+bool buyPE = shortSetup and canEnter and dayOk and volOk and peCool and closedOk and not na(cprBot)
+
+var int lastSqDay = na
+bool sqOffFire = showSqOff and useSession and atSqOff and barstate.isconfirmed and (na(lastSqDay) or lastSqDay != dayId)
+if sqOffFire
+    lastSqDay := dayId
+
+if buyCE
+    lastCeDay := dayId
+if buyPE
+    lastPeDay := dayId
+
+// ================= VOLUME PANE (this indicator pane) =================
+color volCol = volHigh ? (close >= open ? color.new(color.teal, 0) : color.new(color.red, 0)) : (close >= open ? color.new(color.teal, 55) : color.new(color.red, 55))
+plot(vol, "Volume", style = plot.style_columns, color = volCol, histbase = 0)
+plot(volAvg, "Volume MA", color = color.new(color.yellow, 0), linewidth = 2)
+hline(0, "Vol zero", color = color.new(color.gray, 80), linestyle = hline.style_dotted)
+
+// ================= CPR ON PRICE CHART (force_overlay) =================
+tcPlot = plot(cprTop, "CPR Top (TC)", color = color.new(color.green, 0), linewidth = 2, force_overlay = true)
+plot(pivot, "Pivot", color = color.new(color.orange, 0), linewidth = 2, force_overlay = true)
+bcPlot = plot(cprBot, "CPR Bot (BC)", color = color.new(color.red, 0), linewidth = 2, force_overlay = true)
+plot(showR1R2 ? r1 : na, "R1", color = color.new(color.teal, 20), style = plot.style_stepline, force_overlay = true)
+plot(showR1R2 ? r2 : na, "R2", color = color.new(color.teal, 50), style = plot.style_stepline, force_overlay = true)
+plot(showR1R2 ? s1 : na, "S1", color = color.new(color.maroon, 20), style = plot.style_stepline, force_overlay = true)
+plot(showR1R2 ? s2 : na, "S2", color = color.new(color.maroon, 50), style = plot.style_stepline, force_overlay = true)
+plot(showR3S3 ? r3 : na, "R3", color = color.new(color.aqua, 60), style = plot.style_stepline, force_overlay = true)
+plot(showR3S3 ? s3 : na, "S3", color = color.new(color.fuchsia, 60), style = plot.style_stepline, force_overlay = true)
+plot(showPdhPdl ? pdh : na, "PDH", color = color.new(color.blue, 40), style = plot.style_circles, linewidth = 1, force_overlay = true)
+plot(showPdhPdl ? pdl : na, "PDL", color = color.new(color.blue, 40), style = plot.style_circles, linewidth = 1, force_overlay = true)
+fill(tcPlot, bcPlot, color = showZones ? color.new(color.gray, 85) : na, title = "CPR zone")
+
+bgcolor(tintBias ? (aboveCpr ? color.new(color.green, 94) : belowCpr ? color.new(color.red, 94) : insideCpr ? color.new(color.yellow, 94) : na) : na, title = "CPR bias", force_overlay = true)
+bgcolor(useSession and not canEnter and not atSqOff ? color.new(color.orange, 92) : na, title = "No new entries", force_overlay = true)
+
+// Signals: shapes on chart (no big popup table)
+plotshape(buyCE, title = "BUY CE", style = shape.labelup, location = location.belowbar, color = color.green, text = "BUY CE", textcolor = color.white, size = size.small, force_overlay = true)
+plotshape(buyPE, title = "BUY PE", style = shape.labeldown, location = location.abovebar, color = color.red, text = "BUY PE", textcolor = color.white, size = size.small, force_overlay = true)
+plotshape(sqOffFire, title = "EXIT ALL", style = shape.labeldown, location = location.abovebar, color = color.maroon, text = "EXIT ALL", textcolor = color.white, size = size.small, force_overlay = true)
+
+// Compact SL/TP text (optional, small labels only on signal bars)
+if showText and buyCE
+    label.new(bar_index, low, "SL " + str.tostring(cprBot, format.mintick) + " | R1 " + str.tostring(r1, format.mintick) + " | R2 " + str.tostring(r2, format.mintick) + " | " + cprType, yloc = yloc.belowbar, style = label.style_none, textcolor = color.green, size = size.tiny, force_overlay = true)
+if showText and buyPE
+    label.new(bar_index, high, "SL " + str.tostring(cprTop, format.mintick) + " | S1 " + str.tostring(s1, format.mintick) + " | S2 " + str.tostring(s2, format.mintick) + " | " + cprType, yloc = yloc.abovebar, style = label.style_none, textcolor = color.red, size = size.tiny, force_overlay = true)
+
+if buyCE
+    alert(syminfo.ticker + " v1 CPR KGS | BUY CE | ~" + str.tostring(close, format.mintick) + " | SL " + str.tostring(cprBot, format.mintick) + " | R1 " + str.tostring(r1, format.mintick) + " | R2 " + str.tostring(r2, format.mintick) + " | " + cprType + " " + cprSlope + " | SQOFF same day", alert.freq_once_per_bar_close)
+if buyPE
+    alert(syminfo.ticker + " v1 CPR KGS | BUY PE | ~" + str.tostring(close, format.mintick) + " | SL " + str.tostring(cprTop, format.mintick) + " | S1 " + str.tostring(s1, format.mintick) + " | S2 " + str.tostring(s2, format.mintick) + " | " + cprType + " " + cprSlope + " | SQOFF same day", alert.freq_once_per_bar_close)
+if sqOffFire
+    alert(syminfo.ticker + " v1 CPR KGS | EXIT ALL | no carryforward", alert.freq_once_per_bar_close)
+
+alertcondition(buyCE, title = "BUY CE (CPR)", message = "v1 CPR KGS: BUY CE — break above CPR Top, square off same day")
+alertcondition(buyPE, title = "BUY PE (CPR)", message = "v1 CPR KGS: BUY PE — break below CPR Bot, square off same day")
+alertcondition(sqOffFire, title = "EXIT ALL square-off", message = "v1 CPR KGS: EXIT ALL — no carryforward")
+alertcondition(volHigh and barstate.isconfirmed, title = "High volume bar", message = "v1 CPR KGS: high volume on {{ticker}}")

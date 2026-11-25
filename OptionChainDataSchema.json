@@ -1,0 +1,275 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.trading/nifty-intraday-pro/option-chain-data-schema-1.0.json",
+  "title": "NIFTY Intraday Pro – External Option Chain Payload",
+  "description": "Contract between external_option_chain_service.py and the TradingView Pine bridge. Pine cannot fetch this file; the trader or an OS helper copies bridge fields into indicator inputs. Never hard-code example_payload into production Pine as live data.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "status",
+    "symbol",
+    "expiry",
+    "expiry_yymmdd",
+    "spot",
+    "atm_strike",
+    "strike_interval",
+    "strike_range",
+    "chain_timestamp",
+    "fetched_at",
+    "freshness",
+    "usable_for_signals",
+    "strikes",
+    "aggregates",
+    "bridge"
+  ],
+  "properties": {
+    "schema_version": { "type": "string", "const": "1.0" },
+    "status": { "type": "string", "enum": ["ok", "partial", "error"] },
+    "message": { "type": ["string", "null"] },
+    "symbol": { "type": "string", "enum": ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"] },
+    "expiry": { "type": "string", "description": "NSE expiryDates format, e.g. 17-Nov-2026" },
+    "expiry_yymmdd": { "type": "string", "pattern": "^[0-9]{6}$", "description": "TradingView option ticker expiry segment" },
+    "spot": { "type": ["number", "null"] },
+    "atm_strike": { "type": ["number", "null"] },
+    "strike_interval": { "type": "number", "exclusiveMinimum": 0 },
+    "strike_range": { "type": "integer", "enum": [3, 5, 10], "description": "ATM ± N strikes" },
+    "chain_timestamp": { "type": ["string", "null"], "description": "NSE records.timestamp" },
+    "fetched_at": { "type": "string", "description": "ISO-8601 local time when this file was written" },
+    "freshness": { "type": "string", "enum": ["fresh", "stale", "unknown"] },
+    "max_stale_seconds": { "type": "integer", "minimum": 60 },
+    "usable_for_signals": { "type": "boolean" },
+    "source": {
+      "type": "object",
+      "properties": {
+        "provider": { "type": "string" },
+        "endpoints": { "type": "array", "items": { "type": "string" } },
+        "note": { "type": "string" }
+      }
+    },
+    "previous_snapshot": {
+      "type": "object",
+      "properties": {
+        "available": { "type": "boolean" },
+        "fetched_at": { "type": ["string", "null"] },
+        "chain_timestamp": { "type": ["string", "null"] }
+      }
+    },
+    "strikes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["strike", "ce_oi", "pe_oi", "ce_ltp", "pe_ltp"],
+        "properties": {
+          "strike": { "type": "number" },
+          "ce_oi": { "type": ["integer", "null"] },
+          "pe_oi": { "type": ["integer", "null"] },
+          "ce_chg_day": { "type": ["integer", "null"], "description": "NSE changeinOpenInterest for the session" },
+          "pe_chg_day": { "type": ["integer", "null"] },
+          "ce_chg_snap": { "type": ["integer", "null"], "description": "OI delta vs previous local snapshot" },
+          "pe_chg_snap": { "type": ["integer", "null"] },
+          "ce_ltp": { "type": ["number", "null"] },
+          "pe_ltp": { "type": ["number", "null"] },
+          "ce_ltp_chg_snap": { "type": ["number", "null"] },
+          "pe_ltp_chg_snap": { "type": ["number", "null"] },
+          "ce_bid": { "type": ["number", "null"] },
+          "ce_ask": { "type": ["number", "null"] },
+          "ce_bid_qty": { "type": ["integer", "null"] },
+          "ce_ask_qty": { "type": ["integer", "null"] },
+          "ce_spread": { "type": ["number", "null"] },
+          "ce_spread_pct": { "type": ["number", "null"] },
+          "ce_depth_imbalance": { "type": ["number", "null"], "description": "(bid_qty-ask_qty)/(bid+ask); + = more bid" },
+          "ce_moneyness": { "type": ["string", "null"], "enum": ["ITM", "ATM", "OTM", null] },
+          "ce_liquidity": { "type": ["string", "null"], "enum": ["ok", "thin", "poor", "unknown", null] },
+          "pe_bid": { "type": ["number", "null"] },
+          "pe_ask": { "type": ["number", "null"] },
+          "pe_bid_qty": { "type": ["integer", "null"] },
+          "pe_ask_qty": { "type": ["integer", "null"] },
+          "pe_spread": { "type": ["number", "null"] },
+          "pe_spread_pct": { "type": ["number", "null"] },
+          "pe_depth_imbalance": { "type": ["number", "null"] },
+          "pe_moneyness": { "type": ["string", "null"], "enum": ["ITM", "ATM", "OTM", null] },
+          "pe_liquidity": { "type": ["string", "null"], "enum": ["ok", "thin", "poor", "unknown", null] }
+        }
+      }
+    },
+    "liquidity": {
+      "type": "object",
+      "description": "ATM + nearest ITM bid/ask depth and spread summary for entry/exit cost",
+      "properties": {
+        "atm_ce": { "type": ["object", "null"] },
+        "atm_pe": { "type": ["object", "null"] },
+        "nearest_itm_ce": { "type": ["object", "null"] },
+        "nearest_itm_pe": { "type": ["object", "null"] },
+        "band_poor_ce": { "type": "integer" },
+        "band_poor_pe": { "type": "integer" },
+        "note": { "type": "string" }
+      }
+    },
+    "aggregates": {
+      "type": "object",
+      "required": [
+        "total_ce_oi",
+        "total_pe_oi",
+        "pcr",
+        "ce_chg_oi",
+        "pe_chg_oi",
+        "pcr_direction"
+      ],
+      "properties": {
+        "strike_count_expected": { "type": "integer" },
+        "strike_count_actual": { "type": "integer" },
+        "missing_strikes": { "type": "array", "items": { "type": "number" } },
+        "total_ce_oi": { "type": ["integer", "null"] },
+        "total_pe_oi": { "type": ["integer", "null"] },
+        "pcr": { "type": ["number", "null"] },
+        "pcr_prev": { "type": ["number", "null"] },
+        "pcr_chg": { "type": ["number", "null"] },
+        "pcr_direction": { "type": "string", "enum": ["rising", "falling", "sideways", "unknown"] },
+        "ce_chg_oi": { "type": ["integer", "null"], "description": "Sum of ce_chg_snap across band" },
+        "pe_chg_oi": { "type": ["integer", "null"] },
+        "ce_chg_oi_pct": { "type": ["number", "null"] },
+        "pe_chg_oi_pct": { "type": ["number", "null"] },
+        "ce_chg_day_total": { "type": ["integer", "null"] },
+        "pe_chg_day_total": { "type": ["integer", "null"] },
+        "max_ce_oi_strike": { "type": ["number", "null"] },
+        "max_pe_oi_strike": { "type": ["number", "null"] }
+      }
+    },
+    "bridge": {
+      "type": "object",
+      "description": "Compact fields intended for Pine input.* paste. Updated every successful fetch.",
+      "properties": {
+        "pcr": { "type": ["number", "null"] },
+        "pcr_direction": { "type": "string" },
+        "ce_chg_oi": { "type": ["integer", "null"] },
+        "pe_chg_oi": { "type": ["integer", "null"] },
+        "ce_chg_oi_pct": { "type": ["number", "null"] },
+        "pe_chg_oi_pct": { "type": ["number", "null"] },
+        "atm_strike": { "type": ["number", "null"] },
+        "spot": { "type": ["number", "null"] },
+        "freshness": { "type": "string" },
+        "usable_for_signals": { "type": "boolean" },
+        "chain_timestamp": { "type": ["string", "null"] },
+        "paste_line": { "type": "string", "description": "Single line for quick paste into a Pine text input" }
+      }
+    }
+  },
+  "example_payload": {
+    "schema_version": "1.0",
+    "status": "ok",
+    "message": null,
+    "symbol": "NIFTY",
+    "expiry": "17-Nov-2026",
+    "expiry_yymmdd": "261117",
+    "spot": 25044.65,
+    "atm_strike": 25050,
+    "strike_interval": 50,
+    "strike_range": 5,
+    "chain_timestamp": "09-Nov-2026 15:40:00",
+    "fetched_at": "2026-11-09T15:42:10",
+    "freshness": "fresh",
+    "max_stale_seconds": 300,
+    "usable_for_signals": true,
+    "source": {
+      "provider": "nseindia.com",
+      "endpoints": [
+        "https://www.nseindia.com/option-chain",
+        "https://www.nseindia.com/api/option-chain-contract-info?symbol=NIFTY",
+        "https://www.nseindia.com/api/option-chain-v3?type=Indices&symbol=NIFTY&expiry=17-Nov-2026"
+      ],
+      "note": "ILLUSTRATIVE example shaped like a real NSE-derived snapshot. Not live market data. Do not embed in Pine as production values."
+    },
+    "previous_snapshot": {
+      "available": true,
+      "fetched_at": "2026-11-09T15:39:05",
+      "chain_timestamp": "09-Nov-2026 15:30:00"
+    },
+    "strikes": [
+      {
+        "strike": 24800,
+        "ce_oi": 4200,
+        "pe_oi": 9100,
+        "ce_chg_day": 120,
+        "pe_chg_day": 800,
+        "ce_chg_snap": 40,
+        "pe_chg_snap": 210,
+        "ce_ltp": 312.5,
+        "pe_ltp": 48.2,
+        "ce_ltp_chg_snap": 2.1,
+        "pe_ltp_chg_snap": -1.4
+      },
+      {
+        "strike": 25000,
+        "ce_oi": 84324,
+        "pe_oi": 81845,
+        "ce_chg_day": 2100,
+        "pe_chg_day": 4500,
+        "ce_chg_snap": 350,
+        "pe_chg_snap": 900,
+        "ce_ltp": 145.0,
+        "pe_ltp": 118.5,
+        "ce_ltp_chg_snap": 1.5,
+        "pe_ltp_chg_snap": -2.0
+      },
+      {
+        "strike": 25050,
+        "ce_oi": 12114,
+        "pe_oi": 5545,
+        "ce_chg_day": 400,
+        "pe_chg_day": 150,
+        "ce_chg_snap": 80,
+        "pe_chg_snap": 40,
+        "ce_ltp": 122.0,
+        "pe_ltp": 128.0,
+        "ce_ltp_chg_snap": 0.8,
+        "pe_ltp_chg_snap": -0.5
+      },
+      {
+        "strike": 25100,
+        "ce_oi": 29421,
+        "pe_oi": 11281,
+        "ce_chg_day": 900,
+        "pe_chg_day": 300,
+        "ce_chg_snap": 120,
+        "pe_chg_snap": 60,
+        "ce_ltp": 98.5,
+        "pe_ltp": 155.0,
+        "ce_ltp_chg_snap": 0.5,
+        "pe_ltp_chg_snap": -1.0
+      }
+    ],
+    "aggregates": {
+      "strike_count_expected": 11,
+      "strike_count_actual": 11,
+      "missing_strikes": [],
+      "total_ce_oi": 185000,
+      "total_pe_oi": 145500,
+      "pcr": 0.786,
+      "pcr_prev": 0.801,
+      "pcr_chg": -0.015,
+      "pcr_direction": "falling",
+      "ce_chg_oi": 1200,
+      "pe_chg_oi": 1800,
+      "ce_chg_oi_pct": 0.65,
+      "pe_chg_oi_pct": 1.25,
+      "ce_chg_day_total": 8500,
+      "pe_chg_day_total": 11200,
+      "max_ce_oi_strike": 25000,
+      "max_pe_oi_strike": 25000
+    },
+    "bridge": {
+      "pcr": 0.786,
+      "pcr_direction": "falling",
+      "ce_chg_oi": 1200,
+      "pe_chg_oi": 1800,
+      "ce_chg_oi_pct": 0.65,
+      "pe_chg_oi_pct": 1.25,
+      "atm_strike": 25050,
+      "spot": 25044.65,
+      "freshness": "fresh",
+      "usable_for_signals": true,
+      "chain_timestamp": "09-Nov-2026 15:40:00",
+      "paste_line": "PCR=0.786|DIR=falling|CE_dOI=1200|PE_dOI=1800|ATM=25050|SPOT=25044.65|FRESH=fresh|TS=09-Nov-2026 15:40:00"
+    }
+  }
+}
