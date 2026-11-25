@@ -19,3 +19,7 @@ data/users.json
 data/sessions.json
 data/user_logs.json
 
+
+_probe_gift.py
+_probe_gift2.py
+_probe_gift3.py

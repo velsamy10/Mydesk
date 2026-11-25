@@ -241,6 +241,7 @@ def app(environ, start_response):
                     "vwap_ctx": None,
                     "vix": None,
                     "session": ist_session_status(),
+                    "gift_nifty": None,
                     "premium": None,
                     "signal": {
                         "call": "WAIT",

@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -55,6 +56,7 @@ STATE: dict[str, Any] = {
     "vwap_ctx": None,
     "vix": None,
     "session": None,
+    "gift_nifty": None,
     "premium": None,
     "signal": None,
 }
@@ -107,6 +109,76 @@ def ist_session_status() -> dict[str, Any]:
         "entry_ok": entry_ok,
         "phase": phase,
         "note": "Bid/ask + fresh OI need market_open=true. After hours → WAIT/unknown liquidity is normal.",
+    }
+
+
+def _parse_mc_num(raw: str | None) -> float | None:
+    if raw is None:
+        return None
+    try:
+        return float(str(raw).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def fetch_gift_nifty(nifty_spot: float | None = None) -> dict[str, Any]:
+    """
+    GIFT Nifty (ex-SGX Nifty) indicative quote via Moneycontrol live index page.
+    Useful overnight / pre-open cue vs NSE Nifty spot.
+    """
+    url = "https://www.moneycontrol.com/live-index/gift-nifty?symbol=in%3Bgsx"
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "text/html,application/xhtml+xml",
+            "Referer": "https://www.moneycontrol.com/",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=18) as resp:
+        html = resp.read().decode("utf-8", errors="replace")
+
+    def _field(name: str) -> str | None:
+        m = re.search(rf'"{name}"\s*:\s*"([^"]+)"', html, re.I)
+        return m.group(1) if m else None
+
+    last = _parse_mc_num(_field("lastprice"))
+    if last is None:
+        raise RuntimeError("GIFT Nifty quote not found")
+    chg = _parse_mc_num(_field("change"))
+    chg_pct = _parse_mc_num(_field("percentchange"))
+    open_ = _parse_mc_num(_field("open"))
+    high = _parse_mc_num(_field("high"))
+    low = _parse_mc_num(_field("low"))
+    prev = _parse_mc_num(_field("prevclose"))
+    updated = _field("lastupdated") or _field("lastupd")
+    basis = None
+    basis_pct = None
+    if nifty_spot is not None and float(nifty_spot) > 0:
+        basis = round(last - float(nifty_spot), 2)
+        basis_pct = round(basis / float(nifty_spot) * 100.0, 3)
+    # GIFT / NSE IX roughly ~21h; soft window for traders (IST)
+    now = datetime.now(IST)
+    t = now.time()
+    # Broad active window excluding the usual mid-day break ~15:40–16:35 IST
+    in_break = dtime(15, 40) <= t <= dtime(16, 35)
+    session_active = not in_break
+    return {
+        "ltp": round(last, 2),
+        "change": round(chg, 2) if chg is not None else None,
+        "change_pct": round(chg_pct, 2) if chg_pct is not None else None,
+        "open": round(open_, 2) if open_ is not None else None,
+        "high": round(high, 2) if high is not None else None,
+        "low": round(low, 2) if low is not None else None,
+        "prev_close": round(prev, 2) if prev is not None else None,
+        "updated": updated,
+        "nifty_spot": round(float(nifty_spot), 2) if nifty_spot is not None else None,
+        "basis": basis,
+        "basis_pct": basis_pct,
+        "session_active": session_active,
+        "session_note": "NSE IX ~21h (break ~15:40–16:35 IST)" if session_active else "Likely mid-session break (~15:40–16:35 IST)",
+        "source": "Moneycontrol GIFT Nifty (indicative/derived)",
+        "note": "Indicative CFD/index feed — may differ from NSE IX futures print.",
     }
 
 
@@ -723,6 +795,7 @@ def build_snapshot(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     vwap_ctx = None
     vix = None
     session = None
+    gift_nifty = None
     premium = None
     iv_baseline = None
     signal = None
@@ -747,6 +820,10 @@ def build_snapshot(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
             vwap_ctx = fetch_nifty_vwap_context(float(spot) if spot else None)
         except Exception as vwap_exc:  # noqa: BLE001
             vwap_ctx = {"error": str(vwap_exc)}
+        try:
+            gift_nifty = fetch_gift_nifty(float(spot) if spot else None)
+        except Exception as gift_exc:  # noqa: BLE001
+            gift_nifty = {"error": str(gift_exc)}
         try:
             vix = fetch_india_vix()
         except Exception as vix_exc:  # noqa: BLE001
@@ -784,6 +861,7 @@ def build_snapshot(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
         "vwap_ctx": vwap_ctx,
         "vix": vix,
         "session": session,
+        "gift_nifty": gift_nifty,
         "premium": premium,
         "signal": signal,
         "app_version": APP_VERSION,
@@ -871,6 +949,35 @@ HTML = r"""<!DOCTYPE html>
   .liq-thin { color: var(--amber); font-weight: 650; }
   .liq-poor { color: var(--red); font-weight: 650; }
   .liq-unknown { color: var(--muted); }
+  .card-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 12px;
+  }
+  .card-head h2 { margin: 0; }
+  .why-link {
+    flex: 0 0 auto; border: none; background: none; padding: 0;
+    color: #9ec9ff; font-size: 0.8rem; font-weight: 650; cursor: pointer;
+    text-decoration: underline; text-underline-offset: 2px;
+  }
+  .why-link:hover { color: #c5ddff; }
+  .modal-backdrop {
+    display: none; position: fixed; inset: 0; z-index: 50;
+    background: rgba(6, 10, 14, 0.72); align-items: center; justify-content: center;
+    padding: 20px;
+  }
+  .modal-backdrop.open { display: flex; }
+  .modal {
+    width: min(480px, 100%); background: var(--panel); border: 1px solid var(--line);
+    border-radius: 12px; padding: 18px 18px 14px; box-shadow: 0 16px 40px rgba(0,0,0,.45);
+  }
+  .modal-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px;
+  }
+  .modal-head h3 { margin: 0; font-size: 1rem; font-weight: 700; }
+  .modal-close {
+    border: 1px solid var(--line); background: #243040; color: var(--text);
+    border-radius: 6px; padding: 4px 10px; cursor: pointer; font-weight: 650;
+  }
+  .modal-close:hover { background: #2d3d50; }
 </style>
 </head>
 <body>
@@ -890,7 +997,10 @@ HTML = r"""<!DOCTYPE html>
   <div id="error" class="err" style="display:none"></div>
   <div class="grid">
     <section class="card span-4">
-      <h2>Call suggestion</h2>
+      <div class="card-head">
+        <h2>Call suggestion</h2>
+        <button class="why-link" id="whyCallBtn" type="button">why</button>
+      </div>
       <div class="call wait" id="call">WAIT</div>
       <div class="kv">
         <span>Strength</span><span id="strength">—</span>
@@ -939,12 +1049,13 @@ HTML = r"""<!DOCTYPE html>
       </div>
     </section>
     <section class="card span-4">
-      <h2>Session (IST)</h2>
+      <h2>GIFT Nifty</h2>
       <div class="kv">
-        <span>Phase</span><span id="sessPhase">—</span>
-        <span>Market open</span><span id="sessOpen">—</span>
-        <span>Entries OK</span><span id="sessEntry">—</span>
-        <span>Now</span><span id="sessNow">—</span>
+        <span>LTP</span><span id="giftLtp">—</span>
+        <span>Change</span><span id="giftChg">—</span>
+        <span>Open / High / Low</span><span id="giftOhl">—</span>
+        <span>vs Nifty spot</span><span id="giftBasis">—</span>
+        <span>Session</span><span id="giftSess">—</span>
       </div>
     </section>
     <section class="card span-4">
@@ -963,10 +1074,6 @@ HTML = r"""<!DOCTYPE html>
         <span>If spot +50</span><span id="premUp">—</span>
         <span>If spot −50</span><span id="premDn">—</span>
       </div>
-    </section>
-    <section class="card span-12">
-      <h2>Why this call</h2>
-      <ul class="reasons" id="reasons"><li>Waiting for data…</li></ul>
     </section>
     <section class="card span-12">
       <h2>Strike band — OI &amp; Change OI</h2>
@@ -1050,6 +1157,15 @@ HTML = r"""<!DOCTYPE html>
     </section>
   </div>
 </main>
+<div class="modal-backdrop" id="whyModal" role="dialog" aria-modal="true" aria-labelledby="whyModalTitle">
+  <div class="modal">
+    <div class="modal-head">
+      <h3 id="whyModalTitle">Why this call</h3>
+      <button class="modal-close" id="whyModalClose" type="button">Close</button>
+    </div>
+    <ul class="reasons" id="reasonsPopup"><li>Waiting for data…</li></ul>
+  </div>
+</div>
 <script>
 const $ = (id) => document.getElementById(id);
 function chgClass(v) {
@@ -1204,12 +1320,31 @@ async function load() {
     $('ivWarn').textContent = ivWarn || 'None';
     $('ivWarn').className = ivWarn ? 'liq-poor' : 'neu';
 
-    const sess = d.session || sig.session || {};
-    $('sessPhase').textContent = sess.phase || '—';
-    $('sessPhase').className = sess.entry_ok ? 'pos' : sess.market_open ? 'liq-thin' : 'neu';
-    $('sessOpen').textContent = sess.market_open == null ? '—' : (sess.market_open ? 'Yes' : 'No');
-    $('sessEntry').textContent = sess.entry_ok == null ? '—' : (sess.entry_ok ? 'Yes' : 'No');
-    $('sessNow').textContent = sess.now_ist || '—';
+    const gift = d.gift_nifty || {};
+    if (gift.error) {
+      $('giftLtp').textContent = 'unavailable';
+      $('giftChg').textContent = gift.error;
+      $('giftOhl').textContent = '—';
+      $('giftBasis').textContent = '—';
+      $('giftSess').textContent = '—';
+    } else {
+      $('giftLtp').textContent = gift.ltp != null ? Number(gift.ltp).toFixed(2) : '—';
+      $('giftChg').textContent = gift.change != null
+        ? ((gift.change > 0 ? '+' : '') + Number(gift.change).toFixed(2) + (gift.change_pct != null ? ` (${Number(gift.change_pct).toFixed(2)}%)` : ''))
+        : '—';
+      $('giftChg').className = chgClass(gift.change);
+      $('giftOhl').textContent = `${gift.open ?? '—'} / ${gift.high ?? '—'} / ${gift.low ?? '—'}`;
+      if (gift.basis != null) {
+        $('giftBasis').textContent = (gift.basis > 0 ? '+' : '') + Number(gift.basis).toFixed(2)
+          + (gift.basis_pct != null ? ` (${Number(gift.basis_pct).toFixed(3)}%)` : '');
+        $('giftBasis').className = chgClass(gift.basis);
+      } else {
+        $('giftBasis').textContent = '—';
+        $('giftBasis').className = 'neu';
+      }
+      $('giftSess').textContent = gift.session_note || (gift.updated ? ('upd ' + gift.updated) : '—');
+      $('giftSess').className = gift.session_active ? 'pos' : 'liq-thin';
+    }
 
     const vix = d.vix || sig.vix || {};
     if (vix.error) {
@@ -1239,7 +1374,9 @@ async function load() {
     }
 
     const reasons = sig.reasons || [];
-    $('reasons').innerHTML = reasons.length ? reasons.map(x => `<li>${x}</li>`).join('') : '<li>No reasons yet</li>';
+    $('reasonsPopup').innerHTML = reasons.length
+      ? reasons.map(x => `<li>${x}</li>`).join('')
+      : '<li>No reasons yet</li>';
 
     const centre = p.centre_strike ?? p.atm_strike;
     const rows = p.strikes || [];
@@ -1367,6 +1504,12 @@ $('logoutBtn').onclick = async () => {
   await fetch('/api/logout', { method: 'POST', credentials: 'same-origin' });
   location.href = '/login.html';
 };
+function openWhyModal() { $('whyModal').classList.add('open'); }
+function closeWhyModal() { $('whyModal').classList.remove('open'); }
+$('whyCallBtn').onclick = openWhyModal;
+$('whyModalClose').onclick = closeWhyModal;
+$('whyModal').onclick = (e) => { if (e.target === $('whyModal')) closeWhyModal(); };
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeWhyModal(); });
 // Manual refresh only — no timed /api hits
 (async () => {
   const me = await ensureAuth();
