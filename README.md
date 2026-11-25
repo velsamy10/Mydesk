@@ -1,1 +1,34 @@
-# Mydesk
+# Mydesk — NIFTY Monitor v1
+
+Local (and Vercel-ready) NIFTY options helper: PCR, CPR, liquidity, VWAP, IV, India VIX.  
+**Manual Refresh only** — no timed NSE polling.
+
+## Run locally
+
+```bat
+run_monitor.bat
+```
+
+Or:
+
+```bat
+python -u nifty_monitor.py --port 8765 --range 3
+```
+
+Open **http://127.0.0.1:8765/** → click **Refresh now**.
+
+Requires Python 3.10+ on PATH.
+
+## Main files
+
+| File | Purpose |
+|------|---------|
+| `nifty_monitor.py` | Local UI + signal logic |
+| `external_option_chain_service.py` | NSE option-chain fetch |
+| `api/` + `public/` + `vercel.json` | Vercel deploy layout |
+| `*.pine.txt` | TradingView indicators |
+
+## Notes
+
+- After hours, bid/ask may be empty and OI may show not usable — normal.
+- Vercel: NSE may block cloud IPs or hit function timeouts; local run is the reliable path for live chain data.
