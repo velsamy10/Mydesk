@@ -803,6 +803,8 @@ HTML = r"""<!DOCTYPE html>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>NIFTY Monitor v1</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml"/>
+<link rel="apple-touch-icon" href="/favicon.svg"/>
 <style>
   :root {
     --bg: #0f1419;
@@ -1371,12 +1373,24 @@ class LocalMonitorHandler(BaseHTTPRequestHandler):
         self.wfile.write(raw)
 
     def do_GET(self) -> None:  # noqa: N802
-        if self.path in ("/", "/index.html"):
+        path = urllib.parse.urlparse(self.path).path
+        if path in ("/", "/index.html"):
             public = ROOT / "public" / "index.html"
             html = public.read_text(encoding="utf-8") if public.exists() else HTML
             self._html(html)
             return
-        if self.path.startswith("/api/state"):
+        if path == "/favicon.svg":
+            fav = ROOT / "public" / "favicon.svg"
+            if fav.exists():
+                raw = fav.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "image/svg+xml; charset=utf-8")
+                self.send_header("Content-Length", str(len(raw)))
+                self.send_header("Cache-Control", "public, max-age=86400")
+                self.end_headers()
+                self.wfile.write(raw)
+                return
+        if path.startswith("/api/state"):
             with STATE_LOCK:
                 # Local: return cached STATE; empty until first refresh/boot
                 self._json(200, dict(STATE))
