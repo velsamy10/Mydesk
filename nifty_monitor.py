@@ -988,7 +988,6 @@ HTML = r"""<!DOCTYPE html>
   </div>
   <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
     <span class="meta" id="userLabel"></span>
-    <a class="btn" id="adminLogsBtn" href="/admin-logs.html" style="display:none">User logs</a>
     <button class="btn" id="refreshBtn" type="button">Refresh now</button>
     <button class="btn" id="logoutBtn" type="button">Log out</button>
   </div>
@@ -1219,8 +1218,10 @@ async function ensureAuth() {
     location.href = '/login.html';
     return null;
   }
-  $('userLabel').textContent = d.username || '';
-  if (d.is_admin) $('adminLogsBtn').style.display = 'inline-block';
+  $('userLabel').textContent = d.auth_enabled === false ? '' : (d.username || '');
+  if (d.auth_enabled === false) {
+    $('logoutBtn').style.display = 'none';
+  }
   return d;
 }
 async function load() {
@@ -1571,11 +1572,16 @@ class LocalMonitorHandler(BaseHTTPRequestHandler):
         qs = urllib.parse.parse_qs(raw.decode("utf-8", errors="replace"))
         return {k: (v[0] if v else "") for k, v in qs.items()}
 
-    def _current_user(self) -> str | None:
-        from auth_store import COOKIE_NAME, parse_cookies, user_from_cookie
+    def _auth_context(self) -> tuple[bool, str | None, str | None]:
+        """Returns (auth_enabled, raw_session_user, resolved_user)."""
+        from auth_store import COOKIE_NAME, auth_enabled, parse_cookies, resolve_user, user_from_cookie
 
         cookies = parse_cookies(self.headers.get("Cookie"))
-        return user_from_cookie(cookies.get(COOKIE_NAME))
+        raw = user_from_cookie(cookies.get(COOKIE_NAME))
+        return auth_enabled(), raw, resolve_user(raw)
+
+    def _current_user(self) -> str | None:
+        return self._auth_context()[2]
 
     def _client_ip(self) -> str:
         fwd = self.headers.get("X-Forwarded-For") or ""
@@ -1598,7 +1604,7 @@ class LocalMonitorHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         path = urllib.parse.urlparse(self.path).path
-        user = self._current_user()
+        need_login, raw_user, user = self._auth_context()
 
         if path == "/favicon.svg":
             if self._serve_public("favicon.svg", "image/svg+xml; charset=utf-8"):
@@ -1607,7 +1613,7 @@ class LocalMonitorHandler(BaseHTTPRequestHandler):
             return
 
         if path in ("/login.html", "/login"):
-            if user:
+            if not need_login or raw_user:
                 self._redirect("/")
                 return
             if self._serve_public("login.html", "text/html; charset=utf-8"):
@@ -1616,7 +1622,7 @@ class LocalMonitorHandler(BaseHTTPRequestHandler):
             return
 
         if path in ("/register.html", "/register"):
-            if user:
+            if not need_login or raw_user:
                 self._redirect("/")
                 return
             if self._serve_public("register.html", "text/html; charset=utf-8"):
@@ -1627,10 +1633,10 @@ class LocalMonitorHandler(BaseHTTPRequestHandler):
         if path in ("/admin-logs.html", "/admin-logs"):
             from auth_store import is_admin_username
 
-            if not user:
+            if need_login and not raw_user:
                 self._redirect("/login.html")
                 return
-            if not is_admin_username(user):
+            if need_login and not is_admin_username(raw_user):
                 self._redirect("/")
                 return
             if self._serve_public("admin-logs.html", "text/html; charset=utf-8"):
@@ -1641,18 +1647,19 @@ class LocalMonitorHandler(BaseHTTPRequestHandler):
         if path == "/api/me":
             from auth_store import is_admin_username
 
-            if not user:
-                self._json(401, {"ok": False, "authenticated": False})
+            if need_login and not raw_user:
+                self._json(401, {"ok": False, "authenticated": False, "auth_enabled": True})
                 return
-            admin = is_admin_username(user)
+            admin = bool(raw_user and is_admin_username(raw_user))
             self._json(
                 200,
                 {
                     "ok": True,
                     "authenticated": True,
+                    "auth_enabled": need_login,
                     "username": user,
                     "is_admin": admin,
-                    "role": "admin" if admin else "user",
+                    "role": "admin" if admin else ("guest" if not need_login and not raw_user else "user"),
                 },
             )
             return
@@ -1660,10 +1667,10 @@ class LocalMonitorHandler(BaseHTTPRequestHandler):
         if path == "/api/admin/logs":
             from auth_store import is_admin_username, list_user_logs
 
-            if not user:
+            if need_login and not raw_user:
                 self._json(401, {"ok": False, "error": "Login required"})
                 return
-            if not is_admin_username(user):
+            if need_login and not is_admin_username(raw_user):
                 self._json(403, {"ok": False, "error": "Admin only"})
                 return
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -1679,10 +1686,10 @@ class LocalMonitorHandler(BaseHTTPRequestHandler):
         if path == "/api/admin/users":
             from auth_store import is_admin_username, list_users_safe
 
-            if not user:
+            if need_login and not raw_user:
                 self._json(401, {"ok": False, "error": "Login required"})
                 return
-            if not is_admin_username(user):
+            if need_login and not is_admin_username(raw_user):
                 self._json(403, {"ok": False, "error": "Admin only"})
                 return
             self._json(200, {"ok": True, "users": list_users_safe()})
@@ -1697,7 +1704,7 @@ class LocalMonitorHandler(BaseHTTPRequestHandler):
             return
 
         if path in ("/", "/index.html"):
-            if not user:
+            if need_login and not raw_user:
                 self._redirect("/login.html")
                 return
             public = ROOT / "public" / "index.html"
@@ -1706,12 +1713,13 @@ class LocalMonitorHandler(BaseHTTPRequestHandler):
             return
 
         if path.startswith("/api/state"):
-            if not user:
+            if need_login and not raw_user:
                 self._json(401, {"ok": False, "error": "Login required", "signal": {"call": "WAIT"}})
                 return
             with STATE_LOCK:
                 out = dict(STATE)
                 out["username"] = user
+                out["auth_enabled"] = need_login
                 self._json(200, out)
             return
 
@@ -1761,8 +1769,8 @@ class LocalMonitorHandler(BaseHTTPRequestHandler):
             return
 
         if path.startswith("/api/refresh"):
-            user = self._current_user()
-            if not user:
+            need_login, raw_user, user = self._auth_context()
+            if need_login and not raw_user:
                 self._json(401, {"ok": False, "error": "Login required", "signal": {"call": "WAIT"}})
                 return
             refresh_once()
@@ -1770,6 +1778,7 @@ class LocalMonitorHandler(BaseHTTPRequestHandler):
                 out = dict(STATE)
                 out["ok"] = True
                 out["username"] = user
+                out["auth_enabled"] = need_login
                 self._json(200, out)
             return
 
@@ -1804,8 +1813,13 @@ def main() -> int:
     from auth_store import ensure_superadmin
 
     ensure_superadmin()
+    from auth_store import auth_enabled as _auth_on
+
     print(f"MyDesk v{APP_VERSION} running at {url}", flush=True)
-    print("Login required — Register / Log in (admin: superadmin). Ctrl+C to stop.", flush=True)
+    if _auth_on():
+        print("Login required — Register / Log in (admin: superadmin). Ctrl+C to stop.", flush=True)
+    else:
+        print("Login DISABLED — open monitor directly. Set MYDESK_AUTH_ENABLED=1 to require login.", flush=True)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

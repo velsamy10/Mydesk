@@ -32,10 +32,31 @@ MAX_LOGS = 2000
 SUPERADMIN_USERNAME = "superadmin"
 SUPERADMIN_PASSWORD = os.environ.get("MYDESK_SUPERADMIN_PASSWORD") or "Admin$123"
 
+# Login gate: off by default. Set MYDESK_AUTH_ENABLED=1 to require login again.
+AUTH_ENABLED = os.environ.get("MYDESK_AUTH_ENABLED", "0").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
 _SECRET = os.environ.get("MYDESK_AUTH_SECRET") or "mydesk-dev-secret-change-me"
 _LOCK = threading.RLock()
 
 _USERNAME_RE = re.compile(r"^[a-zA-Z0-9_.-]{3,32}$")
+
+
+def auth_enabled() -> bool:
+    return AUTH_ENABLED
+
+
+def resolve_user(username: str | None) -> str | None:
+    """When auth is disabled, treat missing session as guest so APIs stay open."""
+    if username:
+        return username
+    if not AUTH_ENABLED:
+        return "guest"
+    return None
 
 
 def _now_iso() -> str:

@@ -16,6 +16,7 @@ os.environ.setdefault("VERCEL", "1")
 
 from auth_store import (  # noqa: E402
     COOKIE_NAME,
+    auth_enabled,
     authenticate,
     client_ip,
     create_session,
@@ -28,6 +29,7 @@ from auth_store import (  # noqa: E402
     parse_cookies,
     read_json_body,
     register_user,
+    resolve_user,
     session_cookie_header,
 )
 
@@ -104,8 +106,10 @@ def app(environ, start_response):
     method = (environ.get("REQUEST_METHOD") or "GET").upper()
     path = environ.get("PATH_INFO") or "/"
     qs = parse_qs(environ.get("QUERY_STRING") or "")
-    user = current_user(environ)
+    raw_user = current_user(environ)
+    user = resolve_user(raw_user)
     ip = client_ip(environ)
+    need_login = auth_enabled()
 
     if method == "OPTIONS" and path.startswith("/api/"):
         start_response(
@@ -126,7 +130,7 @@ def app(environ, start_response):
         return _send(start_response, "404 Not Found", b"missing", "text/plain; charset=utf-8")
 
     if path in ("/login.html", "/login") and method == "GET":
-        if user:
+        if not need_login or raw_user:
             return _redirect(start_response, "/")
         hit = _file(ROOT / "public" / "login.html", "text/html; charset=utf-8")
         if hit:
@@ -134,7 +138,7 @@ def app(environ, start_response):
         return _send(start_response, "404 Not Found", b"login missing", "text/plain; charset=utf-8")
 
     if path in ("/register.html", "/register") and method == "GET":
-        if user:
+        if not need_login or raw_user:
             return _redirect(start_response, "/")
         hit = _file(ROOT / "public" / "register.html", "text/html; charset=utf-8")
         if hit:
@@ -142,9 +146,9 @@ def app(environ, start_response):
         return _send(start_response, "404 Not Found", b"register missing", "text/plain; charset=utf-8")
 
     if path in ("/admin-logs.html", "/admin-logs") and method == "GET":
-        if not user:
+        if need_login and not raw_user:
             return _redirect(start_response, "/login.html")
-        if not is_admin_username(user):
+        if need_login and not is_admin_username(raw_user):
             return _redirect(start_response, "/")
         hit = _file(ROOT / "public" / "admin-logs.html", "text/html; charset=utf-8")
         if hit:
@@ -182,24 +186,26 @@ def app(environ, start_response):
         )
 
     if path == "/api/me" and method == "GET":
-        if not user:
-            return _json(start_response, 401, {"ok": False, "authenticated": False})
+        if need_login and not raw_user:
+            return _json(start_response, 401, {"ok": False, "authenticated": False, "auth_enabled": True})
+        admin = bool(raw_user and is_admin_username(raw_user))
         return _json(
             start_response,
             200,
             {
                 "ok": True,
                 "authenticated": True,
+                "auth_enabled": need_login,
                 "username": user,
-                "is_admin": is_admin_username(user),
-                "role": "admin" if is_admin_username(user) else "user",
+                "is_admin": admin,
+                "role": "admin" if admin else ("guest" if not need_login and not raw_user else "user"),
             },
         )
 
     if path == "/api/admin/logs" and method == "GET":
-        if not user:
+        if need_login and not raw_user:
             return _json(start_response, 401, {"ok": False, "error": "Login required"})
-        if not is_admin_username(user):
+        if need_login and not is_admin_username(raw_user):
             return _json(start_response, 403, {"ok": False, "error": "Admin only"})
         limit = 200
         if "limit" in qs:
@@ -210,14 +216,14 @@ def app(environ, start_response):
         return _json(start_response, 200, {"ok": True, "logs": list_user_logs(limit)})
 
     if path == "/api/admin/users" and method == "GET":
-        if not user:
+        if need_login and not raw_user:
             return _json(start_response, 401, {"ok": False, "error": "Login required"})
-        if not is_admin_username(user):
+        if need_login and not is_admin_username(raw_user):
             return _json(start_response, 403, {"ok": False, "error": "Admin only"})
         return _json(start_response, 200, {"ok": True, "users": list_users_safe()})
 
     if path in ("/", "/index.html") and method == "GET":
-        if not user:
+        if need_login and not raw_user:
             return _redirect(start_response, "/login.html")
         hit = _file(ROOT / "public" / "index.html", "text/html; charset=utf-8")
         if hit:
@@ -225,7 +231,7 @@ def app(environ, start_response):
         return _send(start_response, "404 Not Found", b"index.html missing", "text/plain; charset=utf-8")
 
     if path == "/api/state" and method == "GET":
-        if not user:
+        if need_login and not raw_user:
             return _json(start_response, 401, {"ok": False, "error": "Login required", "signal": {"call": "WAIT"}})
         try:
             from nifty_monitor import APP_VERSION, ist_session_status
@@ -252,14 +258,15 @@ def app(environ, start_response):
                     "app_version": APP_VERSION,
                     "runtime": "vercel",
                     "username": user,
-                    "is_admin": is_admin_username(user),
+                    "is_admin": bool(raw_user and is_admin_username(raw_user)),
+                    "auth_enabled": need_login,
                 },
             )
         except Exception as exc:  # noqa: BLE001
             return _json(start_response, 500, {"error": str(exc), "signal": {"call": "WAIT"}})
 
     if path == "/api/refresh" and method in ("GET", "POST"):
-        if not user:
+        if need_login and not raw_user:
             return _json(start_response, 401, {"ok": False, "error": "Login required", "signal": {"call": "WAIT"}})
         try:
             from nifty_monitor import build_snapshot
@@ -267,7 +274,8 @@ def app(environ, start_response):
             snap = build_snapshot(_cfg_from_query(qs))
             snap["ok"] = True
             snap["username"] = user
-            snap["is_admin"] = is_admin_username(user)
+            snap["is_admin"] = bool(raw_user and is_admin_username(raw_user))
+            snap["auth_enabled"] = need_login
             return _json(start_response, 200, snap)
         except Exception as exc:  # noqa: BLE001
             return _json(start_response, 500, {"ok": False, "error": str(exc), "signal": {"call": "WAIT"}})
